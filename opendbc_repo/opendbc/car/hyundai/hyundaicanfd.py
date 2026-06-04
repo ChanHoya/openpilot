@@ -88,6 +88,14 @@ class CanBus(CanBusBase):
 
 def create_steering_messages_camera_scc(frame, packer, CP, CAN, CC, lat_active, apply_steer, CS, apply_angle, max_torque, angle_control):
 
+  # [ISG 개선 최초안] 정차 중 조향 Active 차단 (메시지 변조)
+  cc_lat_active = CC.latActive
+  if CS.out.standstill:
+    lat_active = False
+    cc_lat_active = False
+    apply_angle = CS.out.steeringAngleDeg
+    max_torque = 0
+
   emergency_steering = False
   if CS.adrv_0x161 is not None:
     values = CS.adrv_0x161
@@ -131,9 +139,9 @@ def create_steering_messages_camera_scc(frame, packer, CP, CAN, CC, lat_active, 
         pass
       else:
         #values = {} #CS.lfa_alt
-        values["LKAS_ANGLE_ACTIVE"] = 2 if CC.latActive else 1
+        values["LKAS_ANGLE_ACTIVE"] = 2 if cc_lat_active else 1
         values["LKAS_ANGLE_CMD"] = -apply_angle
-        values["LKAS_ANGLE_MAX_TORQUE"] = max_torque if CC.latActive else 0
+        values["LKAS_ANGLE_MAX_TORQUE"] = max_torque if cc_lat_active else 0
       ret.append(packer.make_can_msg("LFA_ALT", CAN.ECAN, values, rx_counter = rx_counter))
 
     if CS.lfa is not None:
@@ -141,12 +149,12 @@ def create_steering_messages_camera_scc(frame, packer, CP, CAN, CC, lat_active, 
       rx_counter = values.pop("COUNTER", None)
       if not emergency_steering:
         values["LKA_MODE"] = 0
-        values["LKA_ICON"] = 2 if CC.latActive else 1
+        values["LKA_ICON"] = 2 if cc_lat_active else 1
         values["TORQUE_REQUEST"] = -1024  # apply_steer,
         values["VALUE63"] = 0 # LKA_ASSIST
         values["STEER_REQ"] = 0  # 1 if lat_active else 0,
         values["HAS_LANE_SAFETY"] = 0  # hide LKAS settings
-        values["LKA_ACTIVE"] = 3 if CC.latActive else 0  # this changes sometimes, 3 seems to indicate engaged
+        values["LKA_ACTIVE"] = 3 if cc_lat_active else 0  # this changes sometimes, 3 seems to indicate engaged
         values["VALUE64"] = 0  #STEER_MODE, NEW_SIGNAL_2
         values["LKAS_ANGLE_CMD"] = -25.6 #-apply_angle,
         values["LKAS_ANGLE_ACTIVE"] = 0 #2 if lat_active else 1,
@@ -357,9 +365,21 @@ def create_acc_control_scc2(packer, CAN, enabled, accel_last, accel, stopping, g
 
   values = copy.copy(CS.scc_control)
   rx_counter = values.pop("COUNTER", None)
+
+  # [정차 중 ISG 시동 유지 및 제동 안정성 패치 (Cause A & B 보완)]
+  # 크루즈가 켜져 있고, 오파가 정차 제어 중이며(stopping), 실제로 멈춘 상태(standstill)일 때만 제동 및 StopReq 고정
+  if enabled and stopping and CS.out.standstill:
+    stop_req = 1
+    a_val = -3.5
+    a_raw = -3.5
+    jerk_l = 0.5
+    jerk_u = 0.5
+  else:
+    stop_req = 1 if stopping or CS.softHoldActive > 0 else 0
+
   values["ACCMode"] = acc_mode
   values["MainMode_ACC"] = 1
-  values["StopReq"] = 1 if stopping or CS.softHoldActive > 0 else 0  # 1: Stop control is required, 2: Not used, 3: Error Indicator
+  values["StopReq"] = stop_req
   values["aReqValue"] = a_val
   values["aReqRaw"] = a_raw
   values["VSetDis"] = set_speed
@@ -417,27 +437,33 @@ def create_acc_control(packer, CAN, enabled, accel_last, accel, stopping, gas_ov
     a_raw = accel
     a_val = np.clip(accel, accel_last - jn, accel_last + jn)
 
+  # [정차 중 ISG 시동 유지 및 제동 안정성 패치 (HDA2/cCNC/CANFD 대응)]
+  # 크루즈가 켜져 있고, 오파가 정차 제어 중이며(stopping), 실제로 멈춘 상태(standstill)일 때만 제동 및 StopReq 고정
+  if enabled and stopping and CS.out.standstill:
+    stop_req = 1
+    a_val = -3.5
+    a_raw = -3.5
+    jerk_l = 0.5
+    jerk_u = 0.5
+  else:
+    stop_req = 1 if stopping or CS.softHoldActive > 0 else 0
+
   values = {
     "ACCMode": 0 if not enabled else (2 if gas_override else 1),
     "MainMode_ACC": 1,
-    "StopReq": 1 if stopping or CS.softHoldActive > 0 else 0,
+    "StopReq": stop_req,
     "aReqValue": a_val,
     "aReqRaw": a_raw,
     "VSetDis": set_speed,
-    #"JerkLowerLimit": jerk if enabled else 1,
-    #"JerkUpperLimit": 3.0,
     "JerkLowerLimit": jerk_l if enabled else 1,
     "JerkUpperLimit": jerk_u,
 
     "ACC_ObjDist": 1,
-    #"ObjValid": 0,
-    #"OBJ_STATUS": 2,
     "NSCCOper": 0,
     "NSCCOnOff": 2,
     "DriveMode": 0,
-    #"SET_ME_3": 0x3,
     "ACC_ObjLatPos": 0x64,
-    "DISTANCE_SETTING": hud_control.leadDistanceBars, # + 5,
+    "DISTANCE_SETTING": hud_control.leadDistanceBars,
     "InfoDisplay": 4 if stopping and CS.out.cruiseState.standstill else 0,
   }
 
@@ -689,6 +715,8 @@ def create_ccnc_messages(CP, packer, CAN, frame, CC, CS, hud_control,
     if CS.lfahda_cluster is not None:
       HDA_CntrlModSta = CS.lfahda_cluster["HDA_CntrlModSta"]
       HDA_LFA_SymSta = CS.lfahda_cluster["HDA_LFA_SymSta"]
+
+
 
     if frame % 2 == 0:
       #if CS.adrv_0x160 is not None:

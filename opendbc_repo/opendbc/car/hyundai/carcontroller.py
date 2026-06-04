@@ -362,7 +362,13 @@ class CarController(CarControllerBase):
       if camera_scc:
         can_sends.extend(hyundaicanfd.create_steering_messages_camera_scc(self.frame, self.packer, self.CP, self.CAN, CC, apply_steer_req, apply_torque, CS, apply_angle, self.lkas_max_torque, angle_control))
       else:
-        can_sends.extend(hyundaicanfd.create_steering_messages(self.packer, self.CP, self.CAN, CC.enabled, apply_steer_req, apply_torque, apply_angle, self.lkas_max_torque, angle_control))
+        # [ISG 개선 최초안] 정차 중 조향 Active 차단 (호출 인자 변조)
+        lat_active_mod = apply_steer_req and not CS.out.standstill
+        enabled_mod = CC.enabled and not CS.out.standstill
+        apply_torque_mod = 0 if CS.out.standstill else apply_torque
+        apply_angle_mod = CS.out.steeringAngleDeg if CS.out.standstill else apply_angle
+        lkas_max_torque_mod = 0 if CS.out.standstill else self.lkas_max_torque
+        can_sends.extend(hyundaicanfd.create_steering_messages(self.packer, self.CP, self.CAN, enabled_mod, lat_active_mod, apply_torque_mod, apply_angle_mod, lkas_max_torque_mod, angle_control))
               
       # prevent LFA from activating on HDA2 by sending "no lane lines detected" to ADAS ECU
       if self.frame % 5 == 0 and hda2 and not camera_scc:

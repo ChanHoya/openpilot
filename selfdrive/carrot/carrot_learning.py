@@ -231,6 +231,41 @@ class CarrotLearner:
 
     prev_brake = self._prev_brake
 
+    # ── 학습 제외 조건 판정 ──────────────────────────
+    left_prob = 1.0
+    right_prob = 1.0
+    left_blinker = False
+    right_blinker = False
+
+    if sm is not None:
+      if 'modelV2' in sm.data and sm.alive.get('modelV2', False):
+        try:
+          model = sm['modelV2']
+          if hasattr(model, 'laneLineProbs') and len(model.laneLineProbs) >= 4:
+            left_prob = model.laneLineProbs[1]
+            right_prob = model.laneLineProbs[2]
+          elif hasattr(model, 'laneLineProbs') and len(model.laneLineProbs) >= 2:
+            left_prob = model.laneLineProbs[0]
+            right_prob = model.laneLineProbs[1]
+        except Exception:
+          pass
+
+      if 'carState' in sm.data and sm.alive.get('carState', False):
+        try:
+          car_state = sm['carState']
+          left_blinker = car_state.leftBlinker
+          right_blinker = car_state.rightBlinker
+        except Exception:
+          pass
+
+    poor_lanes = (left_prob < 0.5 and right_prob < 0.5)
+    blinker_on = (left_blinker or right_blinker)
+    extreme_acceleration = (a_ego > 1.8 or gas_val > 0.5)
+
+    exclude_override = poor_lanes or blinker_on
+    exclude_steer_learning = exclude_override
+    exclude_gas_learning = extreme_acceleration or exclude_override
+    exclude_brake_learning = exclude_override
 
     # UI로부터 초기화(Clear) 신호가 오면 내부 메모리를 비움
     if self._params.get_bool("CarrotLearningClear"):
@@ -245,7 +280,7 @@ class CarrotLearner:
     # 단순히 설정속도에 도달했는데 더 빨리 가고 싶어 밟는 경우는 제외 (설정속도 오버라이드)
     # 즉, 설정속도보다 충분히 낮은데도 가속이 답답할 때만 학습에 포함
     if engaged and gas_pressed and v_ego_kph >= 1.0:
-      if v_ego_kph < (v_cruise_kph - 3.0):
+      if v_ego_kph < (v_cruise_kph - 3.0) and not exclude_gas_learning:
         idx = _speed_band(v_ego_kph)
         self._gas_acc[idx] += _DT
         self._gas_max_accel[idx] = max(self._gas_max_accel[idx], a_ego)
@@ -265,7 +300,7 @@ class CarrotLearner:
     if engaged and v_ego_kph < (v_cruise_kph - 3.0) and not is_speed_bump and v_ego_kph >= 40.0:
       idx = _speed_band(v_ego_kph)
       if brake_pressed:
-        if lead_drel == 0 or lead_drel > 120.0:
+        if (lead_drel == 0 or lead_drel > 120.0) and not exclude_brake_learning:
           self._gas_dec_acc[idx] += _DT
       elif not gas_pressed and a_ego > 1.5: # 자율 주행 중 급가속 감지
         self._gas_dec_auto_acc[idx] += _DT
@@ -297,7 +332,7 @@ class CarrotLearner:
         if steer_rate > _CURVE_RATE_DEG_S:
           if not self._in_curve_entry:
             self._curve_entries += 1
-            if steer_pressed:
+            if steer_pressed and not exclude_steer_learning:
               self._curve_overrides += 1
               # 개입 방향 판정 (desired_angle * steer_err)
               # desired_angle과 steer_err의 부호가 같으면 Outer(풀어주기), 반대면 Inner(더 꺾기)
@@ -313,7 +348,7 @@ class CarrotLearner:
         # 1. 커브 구간 (조향각이 크고 속도가 있을 때)
         if v_ego_kph >= 40.0 and abs(steer_deg) >= 8.0:
           self._torque_curve_entries += 1
-          if steer_pressed:
+          if steer_pressed and not exclude_steer_learning:
             self._torque_curve_overrides += 1
             # 개입 방향 판정
             if desired_angle * steer_err > 0:
@@ -327,7 +362,7 @@ class CarrotLearner:
         # 2. 완만한/직선 구간 (조향각이 작을 때 - Friction 용)
         elif v_ego_kph >= 30.0 and abs(steer_deg) < 4.0:
           self._torque_straight_entries += 1
-          if steer_pressed:
+          if steer_pressed and not exclude_steer_learning:
             self._torque_straight_overrides += 1
 
     self._prev_steer_deg = steer_deg
@@ -337,7 +372,7 @@ class CarrotLearner:
     # A/B안 적용: 과속방지턱 통과 중이거나 40km/h 미만에서는 제동 학습(JLeadFactor) 수집 제외
     if engaged and not gear_park and 0 < lead_drel < 100.0 and not is_speed_bump and v_ego_kph >= 40.0:
       # (1) 수동 제동 트리거
-      if brake_pressed:
+      if brake_pressed and not exclude_brake_learning:
         if not self._prev_brake:
           self._brake_count += 1
         self._brake_max_decel = max(self._brake_max_decel, -a_ego)
@@ -358,12 +393,12 @@ class CarrotLearner:
     # 제동 과다 학습 방지: 강한 제동 중 가속 페달을 밟는 경우 (불필요한 제동 억제)
     # A/B안 적용: 과속방지턱 통과 중이거나 40km/h 미만에서는 가속 오버라이드 학습 수집 제외
     if engaged and gas_pressed and a_ego < -0.8 and not is_speed_bump and v_ego_kph >= 40.0:
-      if 0 < lead_drel < 150.0:
+      if 0 < lead_drel < 150.0 and not exclude_gas_learning:
         self._jlead_gas_acc += _DT
 
     # ── Phase 5: DynamicTFollow / TFollowDecelBoost ──────────────────
     # A/B안 적용: 과속방지턱 통과 중이거나 40km/h 미만에서는 DynamicTFollow 학습 수집 제외
-    if engaged and brake_pressed and not self._prev_brake and not is_speed_bump and v_ego_kph >= 40.0:
+    if engaged and brake_pressed and not self._prev_brake and not is_speed_bump and v_ego_kph >= 40.0 and not exclude_brake_learning:
       # DynamicTFollow: 앞차 급감속 중 브레이크 개입
       if lead_jlead < _DYN_JLEAD_THRESHOLD and lead_drel < 150.0:
         self._dyn_brake_count += 1
@@ -377,7 +412,7 @@ class CarrotLearner:
     # 고속 크루즈 중 선행차가 충분히 멀리 있는데도 gas를 밟는다면
     # → 시스템이 설정된 거리보다 넓게 벌어져 있어 운전자가 좁히려는 것
     if (engaged and gas_pressed and v_ego_kph >= _TFOLLOW_MIN_V_KPH
-        and lead_drel > _TFOLLOW_MIN_LEAD_DREL):
+        and lead_drel > _TFOLLOW_MIN_LEAD_DREL and not exclude_gas_learning):
       gap_idx = self._current_gap - 1  # 0-indexed
       self._tfollow_gas_acc[gap_idx] += _DT
       v_ego_ms = v_ego_kph / 3.6
@@ -388,7 +423,7 @@ class CarrotLearner:
     # 거리 부족 학습 방지: 정속 추종 중 불안해서 브레이크를 밟는 경우 OR Hunting 감지
     if engaged and v_ego_kph >= 40.0 and 0 < lead_drel < 80.0:
       gap_idx = self._current_gap - 1
-      if brake_pressed:
+      if brake_pressed and not exclude_brake_learning:
         if abs(v_ego_kph - lead_v_kph) < 5.0:
           self._tfollow_brake_acc[gap_idx] += _DT
       else:
@@ -400,7 +435,7 @@ class CarrotLearner:
             self._accel_swing_count = 0
             
       # 고속 주행(80km/h 이상) 시 추가 거리 보정 학습
-      if v_ego_kph >= 80.0 and brake_pressed:
+      if v_ego_kph >= 80.0 and brake_pressed and not exclude_brake_learning:
         self._tfollow_speed_brake_acc += _DT
 
     # ── Phase 6: 가변 곡선 감속 학습 ──────────────────────────────────────────
@@ -435,9 +470,9 @@ class CarrotLearner:
         no_lead = (lead_drel == 0.0 or lead_drel > 80.0) # no close lead car
         
         if is_curve and no_lead:
-          if gas_pressed:
+          if gas_pressed and not exclude_gas_learning:
             self._curve_override_gas_sec += _DT
-          elif brake_pressed:
+          elif brake_pressed and not exclude_brake_learning:
             self._curve_override_brake_sec += _DT
             # Track peak deceleration in curve
             self._curve_max_decel = max(self._curve_max_decel, -a_ego)

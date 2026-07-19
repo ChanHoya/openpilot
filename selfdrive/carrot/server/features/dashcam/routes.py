@@ -10,6 +10,7 @@ from ...config import DASHCAM_ROOT
 from . import upload_jobs
 from .catalog import build_routes, segment_file_summary
 from .ffmpeg import browser_video, ensure_preview, ensure_thumbnail
+from .report import build_route_report
 from .paths import (
   file_size_label,
   route_name,
@@ -153,6 +154,17 @@ async def api_dashcam_segments(request: web.Request) -> web.Response:
     return web.json_response({"ok": False, "error": str(e)}, status=500)
 
 
+async def api_dashcam_report(request: web.Request) -> web.Response:
+  try:
+    route = request.match_info.get("route", "")
+    prefer_rlog = request.query.get("source", "rlog") != "qlog"
+    report = await asyncio.to_thread(build_route_report, route, prefer_rlog)
+    status = 200 if report.get("ok") else 404
+    return web.json_response(report, status=status)
+  except Exception as e:
+    return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+
 async def api_dashcam_thumbnail(request: web.Request) -> web.StreamResponse:
   segment = request.match_info.get("segment", "")
   path = await asyncio.to_thread(ensure_thumbnail, segment)
@@ -281,6 +293,7 @@ async def api_dashcam_upload_cancel(request: web.Request) -> web.Response:
 def register(app: web.Application) -> None:
   app.router.add_get("/api/dashcam/routes", api_dashcam_routes)
   app.router.add_get("/api/dashcam/segments/{route}", api_dashcam_segments)
+  app.router.add_get("/api/dashcam/report/{route}", api_dashcam_report)
   app.router.add_get("/api/dashcam/thumbnail/{segment}", api_dashcam_thumbnail)
   app.router.add_get("/api/dashcam/preview/{segment}", api_dashcam_preview)
   app.router.add_get("/api/dashcam/video/{segment}", api_dashcam_video)

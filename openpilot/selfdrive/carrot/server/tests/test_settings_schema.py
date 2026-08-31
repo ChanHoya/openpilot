@@ -96,6 +96,15 @@ def test_vehicle_navi_school_zone_control_is_opt_in(settings, params):
   assert '{"VehicleNaviSchoolZoneControl", {PERSISTENT, BOOL, "0"}}' in params_keys
 
 
+def test_vehicle_navi_curve_control_settings_are_removed(settings):
+  driving = next(category for category in settings["menu"] if category["id"] == "DRIVING")
+  speed = next(group for group in driving["groups"] if group["id"] == "SPEED")
+  curve = next(group for group in speed["groups"] if group["id"] == "SPEED_CURVE")
+  assert not any(name.startswith("VehicleNaviCurve") for name in curve["params"])
+  params_keys = PARAMS_KEYS_PATH.read_text(encoding="utf-8")
+  assert "VehicleNaviCurve" not in params_keys
+
+
 def test_tpms_position_setting_matches_device_support(params):
   by_name = {p["name"]: p for p in params}
   show_tpms = by_name["ShowTpms"]

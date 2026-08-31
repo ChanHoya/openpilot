@@ -12,6 +12,9 @@ def _serv(mode):
   serv.vehicleNaviSchoolZoneControl = False
   serv.autoNaviSpeedSafetyFactor = 1.05
   serv.autoNaviSpeedBumpSpeed = 25
+  serv.autoCurveSpeedLowerLimit = 30
+  serv.autoNaviSpeedCtrlEnd = 6
+  serv.autoNaviSpeedDecelRate = 2.0
   serv.gas_override_speed = 0
   serv.gas_pressed_state = False
   serv.source_last = "none"

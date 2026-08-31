@@ -271,7 +271,6 @@ struct CarState {
   vehicleNaviSectionActive @90 :Bool; # stock-navigation kind 7 indicates a non-school speed-limit section
   vehicleNaviSpeed @91 :Float32; # raw speed from the active stock-navigation CAN profile, kph
   vehicleNaviAvailable @92 :Bool; # stock-navigation 0x4BE has been observed during this drive
-
   struct Tpms {
     fl @0 :Float32;
     fr @1 :Float32;

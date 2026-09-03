@@ -4,6 +4,7 @@ from . import (
   carrot_navi,
   cars,
   dashcam,
+  egpu_model,
   intro,
   mapbox_tokens,
   params,
@@ -47,6 +48,7 @@ def register_all(app: web.Application) -> None:
   system.register(app)
   terminal.register(app)
   dashcam.register(app)
+  egpu_model.register(app)
   screenrecord.register(app)
   tools.register(app)
   autotune.register(app)

@@ -90,6 +90,18 @@
       "scene": "Strong vision range and a distinct closer front-radar track should hand leadOne from the stopped car to the motorcycle without SCC support"
     },
     {
+      "id": "ioniq9-2c5-23-close-born-rear-pass-53",
+      "vehicle_folder": "HYUNDAI_IONIQ_9 c92fab3f15c0dbfb",
+      "log": "000002c5--86044a22d0--23/rlog.zst",
+      "source": "front+corner",
+      "window": [53.45, 54.20],
+      "expected": "clear",
+      "human_verified": true,
+      "target_track_ids": [3284, 3286],
+      "forbidden_lead_two_ids": [3284, 3286],
+      "scene": "The right vehicle first appears beside the rear bumper and pulls ahead while the left vehicle remains parallel; weak perspective drift with close cross-sensor support must not become a CUT-IN"
+    },
+    {
       "id": "k8-2e3-33-close-low-speed-predecel-3423",
       "vehicle_folder": "KIA_K8_HEV_1ST_GEN b34d1abb87cce93b",
       "log": "000002e3--e8f3253035--33/rlog.zst",
@@ -358,6 +370,19 @@
       "scene": "A truck stays in the adjacent right lane while quantized front-radar lateral position briefly moves inward; weak directional consistency must not promote track 57 to leadTwo"
     },
     {
+      "id": "niro-63c-5-close-front-lateral-wander-35",
+      "vehicle_folder": "KIA_NIRO_HEV_2ND_GEN c903ce877d9129f9",
+      "log": "0000063c--4b9b21b7f0--5/rlog.zst",
+      "source": "front",
+      "window": [53.50, 56.50],
+      "expected": "clear",
+      "human_verified": true,
+      "validation_stage": "lead_two",
+      "target_track_ids": [35],
+      "forbidden_lead_two_ids": [35],
+      "scene": "At close range, front-radar lateral wander on a vehicle remaining in the adjacent right lane must not become CUT-IN, pre-deceleration, or leadTwo"
+    },
+    {
       "id": "carnival-ed-11-motorcycle-cutout-stationary-shadow",
       "vehicle_folder": "KIA_CARNIVAL_4TH_GEN c4dcf95545dafe68",
       "log": "000000ed--9fbaeb1dea--11/rlog.zst",
@@ -619,6 +644,32 @@
       "validation_stage": "lead_one",
       "target_track_ids": [34],
       "scene": "Empty road after a weak visual seed: offset stationary front-radar reflection 34 must release when current vision support disappears"
+    },
+    {
+      "id": "carnival-166-2-adjacent-vision-stationary-l1",
+      "vehicle_folder": "KIA_CARNIVAL_4TH_GEN c4dcf95545dafe68",
+      "log": "00000166--a0a89dc8d2--2/rlog.zst",
+      "source": "front+corner",
+      "window": [12.70, 14.50],
+      "expected": "clear",
+      "human_verified": true,
+      "validation_stage": "lead_one",
+      "target_track_ids": [45],
+      "forbidden_lead_one_ids": [45],
+      "scene": "An adjacent visual lead and an opposite-side stationary front-radar reflection must not be associated as leadOne"
+    },
+    {
+      "id": "niro-63f-2-median-vision-stationary-l1",
+      "vehicle_folder": "KIA_NIRO_HEV_2ND_GEN c903ce877d9129f9",
+      "log": "0000063f--0131464865--2/rlog.zst",
+      "source": "front",
+      "window": [53.35, 55.35],
+      "expected": "clear",
+      "human_verified": true,
+      "validation_stage": "lead_one",
+      "target_track_ids": [37],
+      "forbidden_lead_one_ids": [37],
+      "scene": "A moving visual lead must not let the offset stationary center-divider reflection 37 become leadOne"
     },
     {
       "id": "palisade-bef-2-motorcycle-leadone",
@@ -1550,6 +1601,17 @@
       "forbidden_lead_one_ids": [1448, 1510],
       "forbidden_lead_two_ids": [1448, 1510],
       "scene": "A moving vehicle remains far to the right while a tight left curve projects its corner-radar track onto the model path"
+    },
+    {
+      "id": "ioniq9-1c9-2-center-stationary-reflection-23",
+      "vehicle_folder": "HYUNDAI_IONIQ_9 7a9a8e68022c1881",
+      "log": "000001c9--dc79b098bb--2/rlog.zst",
+      "source": "front",
+      "window": [22.70, 23.45],
+      "expected": "clear",
+      "human_verified": true,
+      "forbidden_lead_one_ids": [35],
+      "scene": "A centered stationary road reflection becomes a tentative moving front-radar track near the bumper and must not replace the far vision-matched leadOne through the closer-challenger path"
     }
   ]
 }

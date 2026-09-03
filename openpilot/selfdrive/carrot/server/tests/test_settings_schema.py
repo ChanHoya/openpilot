@@ -35,6 +35,77 @@ def test_the_catalogue_is_readable_and_populated(params):
   assert all(isinstance(p.get("name"), str) and p["name"] for p in params)
 
 
+def test_obsolete_lead_response_settings_are_removed(settings, params):
+  removed = {"JLeadFactor3", "RadarReactionFactor"}
+  by_name = {p["name"] for p in params}
+  assert removed.isdisjoint(by_name)
+  assert all(
+    removed.isdisjoint(group.get("params", []))
+    for category in settings["menu"]
+    for section in category.get("groups", [])
+    for group in section.get("groups", [])
+  )
+  params_keys = PARAMS_KEYS_PATH.read_text(encoding="utf-8")
+  assert all(name not in params_keys for name in removed)
+
+
+def test_automatic_driving_mode_exposes_manual_normal_and_eco_choices(params):
+  by_name = {p["name"]: p for p in params}
+  automatic = by_name["MyDrivingModeAuto"]
+  assert (automatic["min"], automatic["max"], automatic["default"]) == (0, 2, 0)
+  assert "1:일반↔안전" in automatic["descr"]
+  assert "2:에코↔안전" in automatic["descr"]
+
+
+def test_longitudinal_comfort_settings_use_driver_facing_language(params):
+  by_name = {p["name"]: p for p in params}
+
+  lead_response = by_name["DynamicTFollow"]
+  assert lead_response["default"] == 0
+  assert lead_response["display_unit"] == "percent"
+  assert "0%는 사용 안 함" in lead_response["descr"]
+
+  lead_accel_response = by_name["LeadAccelResponse"]
+  assert (lead_accel_response["min"], lead_accel_response["max"], lead_accel_response["default"]) == (0, 5, 0)
+  assert lead_accel_response["control"] == "select"
+  assert "차간거리 1단계" in lead_accel_response["descr"]
+  assert "TFollowGap1" in lead_accel_response["descr"]
+  assert "3단계는 일상 균형형" in lead_accel_response["descr"]
+  assert "최대 0.2m/s²" in lead_accel_response["descr"]
+  assert lead_accel_response["options"]["ko"][3] == "3 균형(추천)"
+  assert lead_accel_response["options"]["ko"][-1] == "5 가속추종(시험)"
+
+  params_keys = PARAMS_KEYS_PATH.read_text(encoding="utf-8")
+  assert '{"LeadAccelResponse", {PERSISTENT, INT, "0"}}' in params_keys
+
+  lane_change = by_name["DynamicTFollowLC"]
+  assert lane_change["default"] == 100
+  assert "100%는 변화 없음" in lane_change["descr"]
+
+  decel_margin = by_name["TFollowDecelBoost"]
+  assert decel_margin["default"] == 50
+  assert "목표 간격" in decel_margin["descr"]
+
+  driving_mode = by_name["MyDrivingMode"]
+  assert "ComfortBrake" not in driving_mode["descr"]
+  assert "멀리서부터 천천히 감속" in driving_mode["descr"]
+
+
+def test_longitudinal_pid_defaults_match_registry(params):
+  by_name = {p["name"]: p for p in params}
+  assert tuple(by_name[name]["default"] for name in (
+    "LongTuningKpV", "LongTuningKiV", "LongTuningKf",
+  )) == (100, 0, 100)
+
+  params_keys = PARAMS_KEYS_PATH.read_text(encoding="utf-8")
+  for name, default in (
+    ("LongTuningKpV", 100),
+    ("LongTuningKiV", 0),
+    ("LongTuningKf", 100),
+  ):
+    assert f'{{"{name}", {{PERSISTENT, INT, "{default}"}}}}' in params_keys
+
+
 def test_c3x_lite_hardware_setting_is_exposed(settings, params):
   by_name = {p["name"]: p for p in params}
   c3x_lite = by_name["HardwareC3xLite"]
@@ -70,6 +141,8 @@ def test_vehicle_navi_can_control_is_opt_in(settings, params):
   assert (control["min"], control["max"], control["default"]) == (0, 1, 0)
   assert control["control"] == "toggle"
   assert control["risk"] == "high"
+  assert "PV5에서는 일반 과속카메라와 방지턱만 지원" in control["descr"]
+  assert "average-speed zones are not yet supported" in control["edescr"]
 
   driving = next(category for category in settings["menu"] if category["id"] == "DRIVING")
   speed = next(group for group in driving["groups"] if group["id"] == "SPEED")
@@ -86,6 +159,8 @@ def test_vehicle_navi_school_zone_control_is_opt_in(settings, params):
   assert (control["min"], control["max"], control["default"]) == (0, 1, 0)
   assert control["control"] == "toggle"
   assert control["risk"] == "high"
+  assert "PV5에서는 아직 동작하지 않습니다" in control["descr"]
+  assert "not yet supported on the PV5" in control["edescr"]
 
   driving = next(category for category in settings["menu"] if category["id"] == "DRIVING")
   speed = next(group for group in driving["groups"] if group["id"] == "SPEED")
@@ -193,42 +268,21 @@ def test_cluster_camera_preference_is_in_brightness_and_view(settings, params):
   assert '{"ShowCameraWithCluster", {PERSISTENT, INT, "0"}}' in params_keys
 
 
-def test_carrot_radar_mode_replaces_removed_model_mode(settings, params):
+def test_carrot_radar_is_fixed_without_mode_or_sensitivity(settings, params):
   by_name = {p["name"]: p for p in params}
-  assert "RadarLeadModelMode" not in by_name
-  assert "RadarDPathMode" not in by_name
-  assert "RadarMotionMode" not in by_name
-  assert (by_name["CarrotRadarMode"]["min"], by_name["CarrotRadarMode"]["max"]) == (0, 1)
-  assert by_name["CarrotRadarMode"]["default"] == 0
-  assert by_name["CarrotRadarMode"]["control"] == "toggle"
-  assert by_name["CarrotRadarMode"]["risk"] == "high"
-  assert "재부팅" in by_name["CarrotRadarMode"]["descr"]
-  assert "restart the vehicle" in by_name["CarrotRadarMode"]["edescr"]
-  sensitivity = by_name["CarrotRadarCutInSensitivity"]
-  assert (
-    sensitivity["min"],
-    sensitivity["max"],
-    sensitivity["default"],
-  ) == (0, 5, 3)
-  assert sensitivity["control"] == "select"
-  assert sensitivity["risk"] == "high"
-  assert sensitivity["options"]["ko"] == [
-    "사용 안 함",
-    "둔감",
-    "약간 둔감",
-    "보통",
-    "민감",
-    "아주 민감",
-  ]
-  assert "당근레이더모드 전용" in sensitivity["descr"]
-  assert "only by Carrot Radar Mode" in sensitivity["edescr"]
+  for removed_name in (
+    "RadarLeadModelMode",
+    "RadarDPathMode",
+    "RadarMotionMode",
+    "CarrotRadarMode",
+    "CarrotRadarCutInSensitivity",
+  ):
+    assert removed_name not in by_name
   vehicle = next(category for category in settings["menu"] if category["id"] == "VEHICLE")
   radar = next(group for group in vehicle["groups"] if group["id"] == "VEH_RADAR")
   assert radar["params"] == [
     "EnableRadarTracks",
     "EnableCornerRadar",
-    "CarrotRadarMode",
-    "CarrotRadarCutInSensitivity",
   ]
 
 

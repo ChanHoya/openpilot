@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from openpilot.common.constants import CV
 from openpilot.selfdrive.carrot.deceleration_source import deceleration_source_presentation
 from openpilot.selfdrive.ui.onroad.exp_button import ExpButton
+from openpilot.selfdrive.ui.onroad.camera_scc_button import CameraSCCButton
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.system.hardware.usbgpu import usbgpu_badge_state
 from openpilot.system.ui.lib.application import gui_app, FontWeight
@@ -156,6 +157,7 @@ class HudRenderer(Widget):
     self._font_display = gui_app.font(FontWeight.DISPLAY)
 
     self._exp_button = ExpButton(UI_CONFIG.button_size, UI_CONFIG.wheel_icon_size)
+    self._camera_scc_button = CameraSCCButton()
 
     self._txt_speed_bg = gui_app.texture('images/speed_bg.png')
 
@@ -269,6 +271,7 @@ class HudRenderer(Widget):
     v_ego = v_ego_cluster if self.v_ego_cluster_seen else car_state.vEgo
     speed_conversion = CV.MS_TO_KPH if ui_state.is_metric else CV.MS_TO_MPH
     self.speed = max(0.0, v_ego * speed_conversion)
+    self._camera_scc_button.update_state()
 
   def _render(self, rect: rl.Rectangle) -> None:
     """Render HUD elements to the screen."""
@@ -293,6 +296,14 @@ class HudRenderer(Widget):
     button_y = rect.y + UI_CONFIG.border_size
     self._exp_button.render(rl.Rectangle(button_x, button_y, UI_CONFIG.button_size, UI_CONFIG.button_size))
 
+    # Camera SCC button: right edge, vertically centered
+    if ui_state.CP is None or ui_state.CP.brand == "hyundai":
+      scc_w = 210
+      scc_h = 114
+      scc_x = rect.x + rect.width - UI_CONFIG.border_size - scc_w
+      scc_y = rect.y + (rect.height - scc_h) / 2
+      self._camera_scc_button.render(rl.Rectangle(scc_x, scc_y, scc_w, scc_h))
+
     if self._plot_renderer is None:
       self._plot_renderer = PlotRenderer()
     self._plot_renderer.draw(rect, self._font_display, self._show_plot_mode)
@@ -303,7 +314,7 @@ class HudRenderer(Widget):
     self._draw_cruise_speed_animation(rect)
 
   def user_interacting(self) -> bool:
-    return self._exp_button.is_pressed
+    return self._exp_button.is_pressed or self._camera_scc_button.is_pressed
 
   def _draw_egpu_badge(self, rect: rl.Rectangle) -> None:
     # Keep runtime state visible while the shared USB hub re-enumerates; a

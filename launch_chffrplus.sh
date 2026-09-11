@@ -4,6 +4,22 @@ DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null && pwd )"
 
 source "$DIR/launch_env.sh"
 
+function disable_automatic_git_maintenance {
+  # Git fetch/pull can otherwise leave a detached repack running into a drive.
+  # Inherit this policy in recovery, web, manager and their Git/submodule workers
+  # without changing .git/config (which would invalidate the staging overlay).
+  local config_count="${GIT_CONFIG_COUNT:-0}"
+  local option
+  for option in gc.auto=0 gc.autoDetach=false maintenance.auto=false; do
+    export "GIT_CONFIG_KEY_${config_count}=${option%%=*}"
+    export "GIT_CONFIG_VALUE_${config_count}=${option#*=}"
+    config_count=$((config_count + 1))
+  done
+  export GIT_CONFIG_COUNT="$config_count"
+}
+
+disable_automatic_git_maintenance
+
 function cleanup_stale_git_lfs_hooks {
   # Some deployed checkouts still contain hooks installed by git-lfs even
   # though the executable is no longer part of the device image. Those hooks
@@ -220,7 +236,6 @@ function start_carrot_recovery {
 }
 
 function start_carrot_web {
-  export CARROT_WEB_EXTERNAL="${CARROT_WEB_EXTERNAL:-1}"
   [ "$CARROT_WEB_EXTERNAL" = "1" ] || return
 
   local watchdog_script="$DIR/scripts/carrot_web_watchdog.sh"
@@ -349,13 +364,40 @@ function invalidate_native_build_if_needed {
   if [ "$missing" = "1" ]; then
     FORCE_REBUILD=1
   fi
+
+  # A prebuilt checkout can retain params_pyx.so from before new keys were
+  # added. Check the loaded registry, not just the presence of native binaries.
+  if ! python3 "$DIR/openpilot/system/manager/params_check.py"; then
+    FORCE_REBUILD=1
+  fi
+}
+
+function start_manager {
+  # A warm start or a long build can leave the launcher on an isolated CPU.
+  # Set the manager's initial mask before Python creates threads or forks:
+  # ordinary services share CPUs 0-5; camera/model/control keep their explicit
+  # affinity overrides. The compiler can still use all eight CPUs separately.
+  if [ -f /AGNOS ]; then
+    taskset -c 0-5 ./manager.py
+  else
+    ./manager.py
+  fi
 }
 
 function launch {
+  # Protect the checkout throughout bootstrap, SCons and manager initialization.
+  # The manager releases this inherited flock after init; background web/recovery
+  # servers must not inherit it. Never delete the lock file itself.
+  export CARROT_REPO_LOCK_PATH="${CARROT_REPO_LOCK_PATH:-/tmp/carrot_repo_update.lock}"
+  exec 9>"$CARROT_REPO_LOCK_PATH"
+  if ! flock -w 300 9; then
+    echo "Another repository operation is still running; launch deferred."
+    exec 9>&-
+    start_carrot_recovery
+    while true; do sleep 1; done
+  fi
+  export CARROT_BOOT_LOCK_FD=9
   cleanup_stale_git_lfs_hooks
-
-  # Remove orphaned git lock if it exists on boot
-  [ -f "$DIR/.git/index.lock" ] && rm -f $DIR/.git/index.lock
 
   # Check to see if there's a valid overlay-based update available. Conditions
   # are as follows:
@@ -405,11 +447,16 @@ function launch {
   if [ "$(cat /data/params/d/SshEnabled 2>/dev/null)" != "1" ]; then
     echo -n 1 > /data/params/d/SshEnabled
   fi
-  start_carrot_recovery
+  (
+    exec 9>&-
+    unset CARROT_BOOT_LOCK_FD
+    start_carrot_recovery
+  )
 
   # hardware specific init
   if [ -f /AGNOS ]; then
     if ! agnos_init; then
+      flock -u 9
       while true; do sleep 1; done
     fi
   fi
@@ -418,16 +465,26 @@ function launch {
   # imports native dependency modules while building Params, so bootstrap them
   # before the first SCons invocation.
   if ! bootstrap_runtime_dependencies; then
+    flock -u 9
     while true; do sleep 1; done
   fi
 
   # Build Params before any long-running carrot service imports it.
   if ! bash "$DIR/scripts/ensure_params_build.sh"; then
     echo "Params registry build failed, not starting openpilot."
+    flock -u 9
     while true; do sleep 1; done
   fi
 
-  start_carrot_web
+  # Export in the parent so manager also knows the external watchdog owns the
+  # web server. An export inside the subshell never reaches manager and causes
+  # a second carrot_server to crash repeatedly on the occupied port 7000.
+  export CARROT_WEB_EXTERNAL="${CARROT_WEB_EXTERNAL:-1}"
+  (
+    exec 9>&-
+    unset CARROT_BOOT_LOCK_FD
+    start_carrot_web
+  )
 
 
   FORCE_REBUILD=0
@@ -444,6 +501,7 @@ function launch {
   if [ "$FORCE_REBUILD" = "1" ] || [ ! -f $DIR/prebuilt ]; then
     if ! ./build.py; then
       echo "openpilot build failed, not starting manager."
+      flock -u 9
       while true; do sleep 1; done
     fi
     if [ "$FORCE_REBUILD" = "1" ]; then
@@ -454,8 +512,16 @@ function launch {
       fi
     fi
   fi
+  # Never start driving services if a rebuild left the Params registry stale.
+  if ! python3 "$DIR/openpilot/system/manager/params_check.py"; then
+    echo "Native Params still do not match this checkout; not starting manager."
+    return 1
+  fi
   start_big_model_update
-  ./manager.py
+  start_manager
+  # Also release if manager failed before reaching main()/initialization.
+  flock -u 9
+  exec 9>&-
 
   # if broken, keep on screen error
   while true; do sleep 1; done

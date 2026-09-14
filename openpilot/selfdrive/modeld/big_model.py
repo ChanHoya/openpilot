@@ -137,11 +137,19 @@ def _write_state(active: BigModelManifest, previous: BigModelManifest | None, ca
 
 
 def fetch_manifest(manifest_url: str = DEFAULT_MANIFEST_URL, timeout: float = 15.0) -> BigModelManifest:
+<<<<<<< HEAD
   # carrot-bmr_v6 intentionally pins commaai/openpilot BMRLNAPv6 at 9d683c06.
   # Keep the environment/CLI override path below so a different manifest can
   # still be tested explicitly without changing this branch.
   if manifest_url == DEFAULT_MANIFEST_URL:
     return BigModelManifest.from_dict(BMRLNAP_V6_MODEL, manifest_url)
+=======
+  # Pin Cinque v2 from commaai/openpilot#38823 at 37bfa141 on this branch.
+  # Keep the environment/CLI override path below so a different manifest can
+  # still be tested explicitly without changing this branch.
+  if manifest_url == DEFAULT_MANIFEST_URL:
+    return BigModelManifest.from_dict(CINQUE_V2_MODEL, manifest_url)
+>>>>>>> carrot-wip
 
   req = Request(manifest_url, headers={"Accept": "application/json", "User-Agent": "carrot-modeld/1"})
   with urlopen(req, timeout=timeout) as response:

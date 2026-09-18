@@ -117,7 +117,7 @@ class LongControl:
 
     """Update longitudinal control. This updates the state machine and runs a PID loop"""
     self.pid.neg_limit = accel_limits[0]
-    self.pid.pos_limit = min(accel_limits[1], max(1.0, a_target_ff + 0.35))
+    self.pid.pos_limit = accel_limits[1]
 
     self.long_control_state = long_control_state_trans(self.CP, active, self.long_control_state, CS.vEgo,
                                                        should_stop, CS.brakePressed,

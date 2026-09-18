@@ -76,8 +76,7 @@ class LongitudinalPlanner:
     self.vCluRatio = 1.0
     self.reset_decel_timer = 0
     self.reset_decel_start_a = 0.0
-    self.cruise_ramp_a = FirstOrderFilter(0.0, 1.5, self.dt)
-    
+
     self.v_cruise_kph = 0.0
 
     self.params = Params()

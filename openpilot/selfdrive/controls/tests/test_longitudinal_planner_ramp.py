@@ -50,5 +50,5 @@ def test_longcontrol_pos_limit_capping():
   )
 
   lc.update(True, CS, long_plan, accel_limits, 0.0, radarState)
-  # PID pos_limit must be clamped to feedforward + 0.35 = 1.55 rather than full 2.5
-  assert lc.pid.pos_limit == pytest.approx(1.55, abs=0.05)
+  # PID pos_limit follows accel_limits[1] to allow full velocity error feedback tracking
+  assert lc.pid.pos_limit == pytest.approx(accel_limits[1])

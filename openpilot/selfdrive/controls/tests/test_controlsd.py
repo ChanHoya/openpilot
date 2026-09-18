@@ -41,7 +41,7 @@ def run_lateral_gate(*, brand="tesla", supported=True, speed=0.0, stopped=True, 
 
   result = []
 
-  def capture(_state, lat_active):
+  def capture(_state, lat_active, *_args):
     result.append(lat_active)
     raise ReachedLateralGate
 

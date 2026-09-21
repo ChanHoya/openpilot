@@ -1,5 +1,79 @@
 # Repository memory
 
+- On 2026-09-21, K9 C4 logs reproduced locationd timing-check invalidity from
+  repeated IMU timestamps over 100 ms old. Historical captures first showed
+  these failures after the September 19 update, despite unchanged HUD 10 FPS,
+  cores 1..4 and FIFO 10. The user authorized normal SCHED_OTHER scheduling for
+  cluster autorun/render workers so sensord FIFO 1 and other realtime work
+  take precedence. Keep legacy ClusterHudPriority/environment overrides from
+  restoring FIFO; retain FPS and core selection. This is a contention mitigation,
+  not a proved fix for the OS/runtime regression. Do not weaken pose validity
+  thresholds or claim vehicle validation from desktop tests. Official 521db4c
+  changes initial gyro-bias covariance, not the observed sensor timestamp delays.
+
+- On 2026-09-21 the user authorized radar optimization and preprocessing
+  isolation to reduce card/camerad contention on core6, with mandatory radar
+  regression validation. RadarInterface/liveTracks now belong to radarcan on
+  core4 FIFO51 (below controlsd/selfdrived FIFO53); card remains core6 FIFO53,
+  model-driven radard/planner core5. Preserve carState.radarInput batch metadata
+  and non-conflated CAN/ego joining: using an arbitrary latest ego sample breaks
+  delay/filter cadence. Keep planner's existing fast liveTracks path during this
+  first isolation step. See docs/radar_process_isolation.md for equivalence,
+  corpus failures and limits. C3/C4 device timing/camera improvements are NOT
+  yet validated. Never present same-core contention as a proved IFE root cause
+  or desktop speedup as a vehicle result. Radar changes also require NAS replay
+  deployment and actual result verification below.
+
+- On 2026-09-20, EV9 `3eef70e8fb92485c` (tizi/C3 family) reproduced Cinque v3
+  dropped-frame odometry invalidity even with `xiaoge_data` stopped. Raw-image
+  upload averaged 24.75 ms and model execution 50.69 ms; C4 `07b62e389ed26c81`
+  used the same artifact at 13.94 ms upload / 39.73 ms execution. Old TG code
+  warped on QCOM before transferring model-sized images, whereas generic v3
+  uploads full NV12 images before AMD warp. The user approved C3-only QCOM
+  pre-upload warp while retaining the existing C4 path. See
+  `docs/c3_preupload_warp.md` for implementation, validation limits and evidence.
+  EV9 segment `000002c9--15d447d91b--0` on 9a349b60 failed the QCOM/AMD pixel
+  comparison and fell back to AMD (7,471,616 USB bytes, about 24.8 ms upload).
+  At that stage the optimization was NOT confirmed active. Diagnose the
+  per-probe mismatch details before changing warp math or acceptance criteria.
+  Follow-up `000002ca--50469cb155--0` on 820f82ea found 16 repeat-stable
+  projective-only mismatches; all eight logged samples reconstruct as adjacent
+  source pixels at half-pixel rounding boundaries. Validation now checks each
+  mismatch against correct-camera/plane NV12 source values within 0.00025
+  source pixels of a rounding boundary. Do not replace this with a percentage
+  or intensity tolerance. On 2026-09-21, EV9 `000002cc--03d0a44f7d--10`
+  on 2723a8eb confirmed QCOM active: 393,728 USB bytes, 5.36 ms upload,
+  34.98 ms mean model execution. Four remaining warnings matched complete
+  camera streams with 12.6-13.2 ms SOF skew: Carrot's strict 10 ms pairing
+  discarded four main frames. Current pairing allows at most 20 ms skew;
+  metadata replay retains all 1,200 EV9 pairs while preserving real Ioniq
+  phase-slip/IFE-loss gaps. This is not on-device validation of the pairing fix.
+  Official v3 also publishes invalid odometry after a real main-frame gap;
+  do not describe this policy as a Carrot-only regression. Official pairing
+  logs >10 ms skew but proceeds; Carrot still bounds large/stale pairs.
+  Preserve official model input/outputs and recurrent state; never hide overload
+  by weakening pose validity. Evaluate model/runtime updates per device family;
+  do not assume C4 validation covers C3, or automatically freeze all C3 models.
+  Keep World Model experiments local and apply its separate validation rules.
+
+- As of 2026-09-20, the user requested deletion of the remote `carrot-worldmodel`
+  branch to prevent others from installing an unfinished experiment. Keep this
+  experiment local only; do not recreate or push its remote branch unless the
+  user explicitly authorizes publication again. Continue applying common
+  `carrot-wip` changes locally while preserving World Model-specific artifacts
+  and runtime work. Only `carrot-wip` must be pushed for shared changes; this
+  exception does not restore any retired branch. World Model has passed isolated
+  synthetic inference, but vehicle control integration remains unvalidated.
+
+- As of 2026-09-19, the user requests full integration of `carrot-cinque_v3` into
+  `carrot-wip`, including the pinned Cinque v3 eGPU model/runtime, AGNOS
+  `19.8-carrot-bt1`, and Bluetooth remote features. This supersedes the earlier
+  Cinque v2/OS separation below. Keep the internal-GPU driving model unchanged;
+  driver monitoring uses official Super Leicht (#38942). After successful
+  integration the user explicitly retired `carrot-cinque_v3`; `carrot-wip` is
+  the sole maintained top-level `carrot-*` branch. Do not recreate v3 or push
+  changes to its detached worktree. Its complete history is merged into wip.
+
 - Whenever radar detection or lead-selection code changes, update the NAS Carrot Routes
   radar replay service in the same task. The `Carrot Routes image` GitHub workflow builds
   committed shared code using `tools/carrot_route_vault/build_bundle.py`; the NAS scheduled
@@ -19,8 +93,8 @@
   differences when synchronizing shared code; do not spread an experiment to other branches.
   The user will explicitly identify new feature experiments and their target branches.
 - As of 2026-09-13, `carrot-wip` is the sole maintained top-level `carrot-*` branch.
-  It incorporates the complete `carrot-cinque_v2` history and uses its pinned Cinque v2
-  eGPU big model from commaai/openpilot#38823. The internal-GPU fallback model is unchanged.
+  It incorporates the complete `carrot-cinque_v2` history. Its former Cinque v2
+  selection was superseded by the 2026-09-19 integration above.
   Commit and push common changes, including radar processing and Carrot Web, to `carrot-wip`;
   verify it matches `origin/carrot-wip` with no unpushed commits before completion.
   Do not recreate retired branches or synchronize changes to their archive tags or detached
@@ -30,11 +104,8 @@
   explicitly requests them. Keep their model selections, generated display assets, compatibility
   changes and dedicated features scoped to those experiments; agree their maintenance scope
   with the user instead of automatically restoring the retired multi-branch synchronization rule.
-- As of 2026-09-17, the user explicitly maintains `carrot-cinque_v3` as an experiment
-  derived from `carrot-wip`. Apply future common `carrot-wip` changes to this branch too,
-  while preserving its pinned Cinque v3 model, generated model labels, and dedicated
-  runtime compatibility changes. Verify both maintained branches are pushed when shared
-  changes are made. This exception does not restore any retired branch.
+- The 2026-09-17 exception maintaining `carrot-cinque_v3` separately ended on
+  2026-09-19 after its complete integration and the user's explicit deletion request.
 - On this Windows workstation, vehicle tmux session captures are stored under
   `\\DS1821P\openpilot\<branch>`. When tmux is mentioned, search the directory for the known
   branch for a vehicle folder whose name ends with the exact dongle ID. If the branch is unknown,

@@ -9,13 +9,14 @@ from openpilot.common.realtime import Priority, config_realtime_process
 from openpilot.common.runtime_diagnostics import RuntimeDiagnostics
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.carrot.radar.can_batch import MAX_INPUT_AGE_NS, RadarCanBatches, RadarEgoSample
+from openpilot.selfdrive.carrot.radar.lateral import set_radar_track_flip
 from openpilot.selfdrive.pandad import can_capnp_to_list
 from opendbc.car.car_helpers import interfaces
 
 
 def main():
-  # controlsd/selfdrived on core4 are FIFO53; this FIFO51 worker yields to
-  # their deadlines. Keep card/camera core6 and model/runtime core7 untouched.
+  # Share core4/FIFO51 with planner. Card/radard use core5; short control/state
+  # work shares core6 with camera; model/DM remain on core7.
   config_realtime_process(4, Priority.CTRL_LOW)
   poller = messaging.Poller()
   can_sock = messaging.sub_sock('can', poller=poller, conflate=False)
@@ -24,6 +25,8 @@ def main():
   CP = messaging.log_from_bytes(Params().get('CarParams', block=True), car.CarParams)
   radar_interface = interfaces[CP.carFingerprint].RadarInterface
   radar = radar_interface(CP)
+  # Latch once per onroad start; never change a track's side during a drive.
+  radar_track_flip = Params().get_bool('RadarTrackFlip')
   batches = RadarCanBatches()
   diagnostics = RuntimeDiagnostics('radarcan', cloudlog.event)
   last_input_ns = time.monotonic_ns()
@@ -45,6 +48,7 @@ def main():
       msg = messaging.new_message('liveTracks')
       msg.valid = False
       msg.liveTracks.errors.canError = True
+      msg.liveTracks.radarTrackFlipped = radar_track_flip
       pm.send('liveTracks', msg)
       last_error_publish_ns = now_ns
 
@@ -89,6 +93,8 @@ def main():
         msg = messaging.new_message('liveTracks')
         msg.valid = not any(result.errors.to_dict().values())
         msg.liveTracks = result
+        # Assignment copies the result: decoder points/filter history stay raw.
+        set_radar_track_flip(msg.liveTracks, radar_track_flip)
         pm.send('liveTracks', msg)
     now_ns = now()
     if now_ns - min(last_input_ns, last_can_input_ns) > MAX_INPUT_AGE_NS:

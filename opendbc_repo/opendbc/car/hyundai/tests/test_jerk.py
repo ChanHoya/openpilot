@@ -220,7 +220,7 @@ def test_canfd_hold_interlock_blocks_acc_control(camera_scc, brake_hold_active, 
     )
     assert accel_value == 0
   else:
-    msg = create_acc_control(
+    msg, _ = create_acc_control(
       FakePacker(), CAN, True, -0.5, 1.0, True, False, 30.0, hud_control, 1.0, 5.0, CS,
     )
 
@@ -255,7 +255,7 @@ def test_canfd_cruise_unavailable_blocks_soft_hold_acc_control(camera_scc):
     )
     assert accel_value == 0
   else:
-    msg = create_acc_control(
+    msg, _ = create_acc_control(
       FakePacker(), CAN, False, -0.5, 0.0, False, False, 30.0, hud_control, 1.0, 5.0, CS,
     )
 
@@ -269,7 +269,7 @@ def test_canfd_cruise_unavailable_blocks_soft_hold_acc_control(camera_scc):
 def test_canfd_tcs_braking_signals_remain_blocked_during_auto_hold(brake_hold_active):
   class FakePacker:
     @staticmethod
-    def make_can_msg(name, bus, values):
+    def make_can_msg(name, bus, values, *, rx_counter=None):
       return name, bus, values.copy()
 
   CAN = SimpleNamespace(CAM=2)

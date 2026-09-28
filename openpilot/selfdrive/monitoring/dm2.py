@@ -59,6 +59,19 @@ class DriverMonitoring2(DriverMonitoring):
   def _timeouts(self, kind):
     return tuple(getattr(self.settings, f'_{kind}_POLICY_ALERT_{i}_TIMEOUT') for i in (1, 2, 3))
 
+  def set_experimental(self, experimental):
+    """Switch policy on the existing monitor; never treat a mode edit as attention."""
+    if self.experimental == experimental:
+      return
+    self.experimental = experimental
+    # A previous mode's interaction allowance/forward streak cannot be replayed.
+    self.grace_started = -math.inf
+    self.grace_expired = True
+    self.forward_frames = 0
+    self.forward_recovery = False
+    # configure_context remaps elapsed time into the new budget on this frame.
+    # Awareness, calibration, traffic hold, terminal counts and lockout survive.
+
   def _active_kind(self):
     return 'VISION' if self.active_policy == MonitoringPolicy.vision else 'WHEELTOUCH'
 
@@ -141,14 +154,23 @@ class DriverMonitoring2(DriverMonitoring):
   def _get_distracted_types(self):
     fields = ('_POSE_PITCH_THRESHOLD', '_PITCH_NATURAL_THRESHOLD', '_POSE_YAW_THRESHOLD')
     previous = [getattr(self.settings, field) for field in fields]
-    if self.relax_pose and self.alert_level not in (AlertLevel.two, AlertLevel.three):
-      for field, value in zip(fields, previous, strict=True):
-        setattr(self.settings, field, value * 1.2)
+    previous_phone = self.settings._PHONE_THRESH
+
     try:
+      # 기존 고개 방향 완화 조건 유지
+      if self.relax_pose and self.alert_level not in (AlertLevel.two, AlertLevel.three):
+        for field, value in zip(fields, previous, strict=True):
+          setattr(self.settings, field, value * 1.2)
+
+      # 수면 기준은 실험모드 여부만으로 적용
+      if self.experimental:
+        self.settings._PHONE_THRESH = 0.98
+
       super()._get_distracted_types()
     finally:
       for field, value in zip(fields, previous, strict=True):
         setattr(self.settings, field, value)
+      self.settings._PHONE_THRESH = previous_phone
 
   def _update_states(self, driver_state, *args, **kwargs):
     super()._update_states(driver_state, *args, **kwargs)

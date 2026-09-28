@@ -1,5 +1,22 @@
 # Repository memory
 
+- On 2026-09-28, the user superseded the Ioniq 5 PE-only touch restriction:
+  Hyundai/Kia/Genesis CAN-FD uses original ECAN STEER_TOUCH_2AF by received
+  profile, without a vehicle-name whitelist. Require the named DBC/address/size,
+  existing layout/checksum/status/counter and freshness checks. Discover late
+  arrivals with optional registration only after reception; do not add missing-
+  hardware CAN faults or populate/modify ADAS TX caches. Address 0x2AF alone
+  is insufficient. All 37 configured CAN-FD platforms pass synthetic parser
+  tests; physical evidence remains Ioniq 5 PE only. See docs/driver_monitoring_dm2.md.
+
+- On 2026-09-28, the user authorized clearing DM lockout after confirmed parking:
+  valid/fresh Park, raw zero speed, standstill and disengaged/inactive status for
+  one continuous second, in both modes with or without camera. Filtered speed
+  may have only <0.01 m/s settling residue. Speed-only or engage OFF/ON resets
+  are excluded. Keep stock policy.py unchanged; selfdrived persists fresh DM
+  lock/release transitions so a cleared saved flag cannot relock on DM restart.
+  Desktop tests do not validate actual parking. See docs/driver_monitoring_dm2.md.
+
 - On 2026-09-28, the user authorized automatic Git update/reboot after failed
   builds or manager startup, waiting through network loss. The launcher owns a
   standalone recovery display and releases its build lock before recovery Git.

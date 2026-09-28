@@ -8,7 +8,8 @@ debt exclusion, 1.5x forward recovery and ten-second traffic window. The user
 explicitly selected delaying camera warnings for the unavailable-camera mode-1
 allowance after input, rather than immediately resuming camera evaluation.
 
-- Camera mode 0: stock comma policy, including stock internal face-loss fallback.
+- Camera mode 0: stock comma monitoring criteria and internal face-loss fallback,
+  with the explicitly requested confirmed-parking reset below.
 - Unavailable-camera mode 0: 15/30/45-second interaction alerts.
 - Unavailable-camera mode 1: same timing, doubled only with verified empty-road
   conditions; eligible input resets the entire allowance before terminal alert.
@@ -27,10 +28,38 @@ allowance after input, rather than immediately resuming camera evaluation.
 
 ## Stock boundary and state transitions
 
+### Confirmed parking reset (2026-09-28 follow-up)
+
+The user authorized a reset after parking. All four camera/mode combinations
+reset accumulated terminal/no-response counts, lockout, alert level and awareness
+after one continuous second of Park, reported standstill, raw speed exactly zero,
+finite filtered speed below 0.01 m/s in magnitude, and both enabled/active false.
+The tiny filtered-speed tolerance only accommodates Kalman settling; it cannot
+replace the raw-zero/standstill/Park checks. Both carState and selfdriveState
+must pass validity, liveness and frequency checks and have ages in [0, 0.25) s;
+CAN must be valid. Demo mode is excluded. Failed checks, backwards time and loop
+gaps over 0.25 s restart confirmation. No speed-only or engage-cycle reset is
+added, and no automatic engagement occurs.
+
+One reset is emitted per confirmed parking interval. Stored DriverTooDistracted
+is synchronized by its existing selfdrived owner from fresh healthy DM packets
+on both transitions; restarting DM cannot resurrect a cleared stored flag once
+the release has been received. A crash before that acknowledgement remains
+conservative. Renewed lockout can be persisted again. Existing thirty-minute
+recovery also benefits from this symmetric persistence instead of keeping a
+stale true flag. The policy.py implementation and running warning thresholds
+remain unchanged; mode-0 equivalence excludes this parking reset.
+
+Tests cover all modes/camera availability with and without AlwaysOnDM, moving or
+non-P gears, invalid/stale/future data, partial parking/gaps, saved-state recovery
+and repeated locking, and daemon publication. 146 adapted tests pass; real cereal
+types are used, with native IPC/Params/hardware adapted on Windows. This does not
+establish physical vehicle parking or on-device restart behavior.
+
 Stock monitoring/policy.py and monitoring/dmonitoringd.py remain unchanged. The
 manager runs the separate dm2d dispatcher at the existing scheduling placement.
 DriverMonitoring2 modifies its own settings instance, retaining normal camera
-mode-0 equivalence. Models, artifacts and inference behavior do not change.
+mode-0 equivalence outside the parking reset. Models, artifacts and inference behavior do not change.
 
 Camera absence, failure, malformed probabilities/vectors and stale output select
 automatic interaction fallback. Two continuous seconds of healthy samples restore
@@ -77,12 +106,19 @@ not count. Automatic ego/set-speed changes are never driver interactions.
 
 ### Original steering touch input (2026-09-28)
 
-Ioniq 5 PE alone enables the received `STEER_TOUCH_2AF` profile. `CarState.steeringTouch`
+The later user request removes the initial Ioniq 5 PE-only whitelist. All
+Hyundai/Kia/Genesis CAN-FD vehicle configurations now admit the same received
+`STEER_TOUCH_2AF` profile. `CarState.steeringTouch`
 records availability, validity, contact, original CAN timestamp and raw status /
 TOUCH1 / TOUCH2. It reads the existing ECAN parser's raw bytes, never the mutable
 forwarding cache, CAM input or Panda transmit receipts. Existing ADAS transmit
-code, safety rules, message registration and global torque-based steeringPressed
-remain unchanged. This bus distinction does not authenticate a sensor against
+code, safety rules and global torque-based steeringPressed remain unchanged.
+After an original frame is seen, an unregistered named message is registered
+with optional frequency so late arrivals work after startup fingerprinting.
+Absent hardware or later dropout cannot create a new CAN-liveness requirement.
+The decoder does not populate the ADAS forwarding cache. The DBC message name,
+address and size must match; numeric address 0x2AF alone cannot enable touch.
+This bus distinction does not authenticate a sensor against
 another device injecting frames onto ECAN.
 
 Six one-minute historical segments yielded 3,597 original 10 Hz frames. All fit
@@ -105,6 +141,13 @@ successive counters and sample age <=250 ms. Startup/recovery requires two
 consecutive valid frames; malformed, repeated-counter, unknown-layout or stale
 input grants no contact. Replay accepted 3,591 frames after the six initial
 counter baselines, including 1,015 contacts. No new mandatory CAN checks are added.
+
+The profile-based follow-up passes 184 adapted policy/parser/dispatcher tests,
+including real CAN parsers for all 37 configured CAN-FD platforms, discovery
+after startup, wrong-bus/TX receipt rejection, an unrelated DBC and optional
+message dropout. These are synthetic platform checks. Physical/log-derived
+touch evidence remains the six Ioniq 5 PE segments above, not a fleet-wide
+verification that every vehicle uses the same profile.
 
 Without a usable camera, fresh continuous contact maintains wheel awareness
 before terminal alert in both modes. In camera mode 1 only a valid release-to-

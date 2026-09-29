@@ -1,4 +1,4 @@
-﻿import sys
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 sys.path.insert(0,str(Path(__file__).parent))
@@ -88,7 +88,10 @@ def test_navigation_large_event_survives_slow_fragment_consumer():
   from hud_navi import send_event
   if not hasattr(socket, 'AF_UNIX') or not hasattr(socket, 'SOCK_SEQPACKET'):
     pytest.skip('Linux SEQPACKET regression')
-  writer, reader = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+  try:
+    writer, reader = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+  except OSError:
+    pytest.skip('Linux SEQPACKET regression')
   writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, CHUNK * 2)
   raw = bytes(range(256)) * 1040  # A real-size 266KB navigation keyframe.
   completed = []
@@ -125,7 +128,10 @@ def test_navigation_stopped_consumer_has_one_bounded_event_deadline():
   from hud_navi import send_event
   if not hasattr(socket, 'AF_UNIX') or not hasattr(socket, 'SOCK_SEQPACKET'):
     pytest.skip('Linux SEQPACKET regression')
-  writer, reader = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+  try:
+    writer, reader = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+  except OSError:
+    pytest.skip('Linux SEQPACKET regression')
   writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, CHUNK * 2)
   try:
     started = time.monotonic()

@@ -108,9 +108,9 @@ class TestManager:
     CP = car.CarParams.new_message()
     params = Params()
 
-    params.put("ClusterHud", "0")
+    params.put_int("ClusterHud", 0)
     assert process.should_run(False, params, CP)
-    params.put("ClusterHud", "1")
+    params.put_int("ClusterHud", 1)
     assert process.should_run(False, params, CP)
 
   def test_cluster_hud_excludes_carrot_vision_processes(self):
@@ -120,14 +120,14 @@ class TestManager:
     params.put_bool("CarrotVisionEnabled", True)
     params.put_bool("CarrotVisionActive", False)
 
-    params.put("ClusterHud", "0")
+    params.put_int("ClusterHud", 0)
     assert not managed_processes["carrot_vision_encoderd"].should_run(False, params, CP)
     assert managed_processes["carrot_webrtcd"].should_run(True, params, CP)
     assert managed_processes["carrot_vision_encoderd"].should_run(True, params, CP)
     params.put_bool("CarrotVisionActive", True)
     assert managed_processes["carrot_vision_encoderd"].should_run(True, params, CP)
 
-    params.put("ClusterHud", "1")
+    params.put_int("ClusterHud", 1)
     assert managed_processes["carrot_cluster"].should_run(True, params, CP)
     assert not managed_processes["carrot_webrtcd"].should_run(True, params, CP)
     assert not managed_processes["carrot_vision_encoderd"].should_run(True, params, CP)
@@ -138,7 +138,7 @@ class TestManager:
     params = Params()
     params.put_bool("CarrotVisionEnabled", True)
     params.put_bool("CarrotVisionActive", True)
-    params.put("ClusterHud", "2")
+    params.put_int("ClusterHud", 2)
 
     assert not managed_processes["carrot_cluster"].should_run(True, params, CP)
     assert managed_processes["carrot_webrtcd"].should_run(True, params, CP)

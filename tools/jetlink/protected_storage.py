@@ -195,9 +195,10 @@ def boot():
     record = latest(data_identity() + ([backup] if backup is not None else []))
     if record is not None:
       restore(Path('/'), record)
-  hostname = Path('/etc/hostname').read_text().strip()
-  if re.fullmatch(r'[a-z][a-z0-9-]{0,61}[a-z0-9]|[a-z]', hostname):
-    run('hostname', hostname)
+  if Path('/etc/hostname').exists():
+    hostname = Path('/etc/hostname').read_text().strip()
+    if re.fullmatch(r'[a-z][a-z0-9-]{0,61}[a-z0-9]|[a-z]', hostname):
+      run('hostname', hostname)
   durable_write(STATUS, json.dumps({'format': 1, 'state': state, 'system_read_only': True}).encode(), 0o644)
   stage(state)
 

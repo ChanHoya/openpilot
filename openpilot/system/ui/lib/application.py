@@ -135,11 +135,10 @@ class TextAlignmentVertical(IntEnum):
   BOTTOM = 2
 
 
-def font_fallback(font: rl.Font, text: str | None = None) -> rl.Font:
-  """Fall back to DISPLAY/Unifont for languages or texts that require it."""
-  if gui_app.has_font(FontWeight.DISPLAY):
-    if multilang.requires_unifont() or (text is not None and any(ord(c) > 127 for c in str(text))):
-      return gui_app.font(FontWeight.DISPLAY)
+def font_fallback(font: rl.Font) -> rl.Font:
+  """Fall back to unifont for languages that require it."""
+  if multilang.requires_unifont() and gui_app.has_font(FontWeight.DISPLAY):
+    return gui_app.font(FontWeight.DISPLAY)
   return font
 
 
@@ -1025,7 +1024,7 @@ class GuiApplication:
       rl._orig_draw_text_ex = rl.draw_text_ex
 
     def _draw_text_ex_scaled(font, text, position, font_size, spacing, tint):
-      font = font_fallback(font, text)
+      font = font_fallback(font)
       if native_text.try_plain_text(rl, font, text, position, font_size * FONT_SCALE, spacing, tint):
         return
       return rl._orig_draw_text_ex(font, text, position, font_size * FONT_SCALE, spacing, tint)

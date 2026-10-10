@@ -135,11 +135,13 @@ class TextAlignmentVertical(IntEnum):
   BOTTOM = 2
 
 
-def font_fallback(font: rl.Font) -> rl.Font:
-  """Fall back to unifont for languages that require it."""
-  if multilang.requires_unifont() and gui_app.has_font(FontWeight.DISPLAY):
-    return gui_app.font(FontWeight.DISPLAY)
+def font_fallback(font: rl.Font, text: str | None = None) -> rl.Font:
+  """Fall back to DISPLAY/Unifont for languages or texts that require it."""
+  if gui_app.has_font(FontWeight.DISPLAY):
+    if multilang.requires_unifont() or (text is not None and any(ord(c) > 127 for c in str(text))):
+      return gui_app.font(FontWeight.DISPLAY)
   return font
+
 
 
 class MousePos(NamedTuple):

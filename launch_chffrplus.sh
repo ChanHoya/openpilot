@@ -322,13 +322,19 @@ function invalidate_modeld_build_if_needed {
 
 function prepare_big_model_if_needed {
   BIG_MODEL_SHA=""
+  unset CARROT_BIG_MODEL_STARTUP_FAILED
 
-  # Only local state is consulted on the startup path. Remote model delivery
-  # runs in the background below and must never delay manager startup.
+  # With an attached eGPU, install this checkout's selection before building or
+  # starting modeld. Offline delivery retries here instead of running an old model.
   if ! python3 -c 'from openpilot.selfdrive.modeld.helpers import usbgpu_present; raise SystemExit(0 if usbgpu_present() else 1)' 2>/dev/null; then
     return
   fi
 
+  if ! flock /tmp/big_model_update.lock python3 -m openpilot.selfdrive.modeld.big_model --prepare-for-startup --retry-network; then
+    echo "Selected eGPU model preparation failed; using the internal model this boot."
+    export CARROT_BIG_MODEL_STARTUP_FAILED=1
+    return
+  fi
   BIG_MODEL_SHA="$(python3 -m openpilot.selfdrive.modeld.big_model --active-sha 2>/dev/null || true)"
 
   # Do not reject compilation from a one-shot 12V check here. During ignition
@@ -351,16 +357,16 @@ function start_big_model_update {
       exec 9>"$lock_path"
       flock -n 9 || exit 0
       if command -v ionice >/dev/null 2>&1; then
-        PYTHONUNBUFFERED=1 ionice -c 3 nice -n 10 python3 -m openpilot.selfdrive.modeld.big_model --ensure-if-egpu --network-wait-seconds 60
+        PYTHONUNBUFFERED=1 ionice -c 3 nice -n 10 python3 -m openpilot.selfdrive.modeld.big_model --ensure-if-egpu --network-wait-seconds 60 --retry-network
       else
-        PYTHONUNBUFFERED=1 nice -n 10 python3 -m openpilot.selfdrive.modeld.big_model --ensure-if-egpu --network-wait-seconds 60
+        PYTHONUNBUFFERED=1 nice -n 10 python3 -m openpilot.selfdrive.modeld.big_model --ensure-if-egpu --network-wait-seconds 60 --retry-network
       fi
     ) >> "$log_path" 2>&1 &
   else
     if command -v ionice >/dev/null 2>&1; then
-      PYTHONUNBUFFERED=1 ionice -c 3 nice -n 10 python3 -m openpilot.selfdrive.modeld.big_model --ensure-if-egpu --network-wait-seconds 60 >> "$log_path" 2>&1 &
+      PYTHONUNBUFFERED=1 ionice -c 3 nice -n 10 python3 -m openpilot.selfdrive.modeld.big_model --ensure-if-egpu --network-wait-seconds 60 --retry-network >> "$log_path" 2>&1 &
     else
-      PYTHONUNBUFFERED=1 nice -n 10 python3 -m openpilot.selfdrive.modeld.big_model --ensure-if-egpu --network-wait-seconds 60 >> "$log_path" 2>&1 &
+      PYTHONUNBUFFERED=1 nice -n 10 python3 -m openpilot.selfdrive.modeld.big_model --ensure-if-egpu --network-wait-seconds 60 --retry-network >> "$log_path" 2>&1 &
     fi
   fi
 }
@@ -496,6 +502,11 @@ function launch {
     if ! agnos_init; then
       flock -u 9
       while true; do sleep 1; done
+    fi
+    # Offline wall-clock floor after any OS update, before dependency/bootstrap
+    # or Params SCons work. GPS timed starts only after the main build.
+    if ! run_startup_command python3 "$DIR/openpilot/common/build_time.py"; then
+      show_startup_failure "System clock correction failed before build"
     fi
   fi
 

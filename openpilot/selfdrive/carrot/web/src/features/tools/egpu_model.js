@@ -14,7 +14,30 @@ const FALLBACK_STRINGS = {
   waiting_for_ignition: "Waiting for ignition",
   compiling: "Compiling eGPU model",
   compiled: "Ready to use",
-  error: "Needs attention",
+  error: "eGPU setup failed",
+  runtime_error: "eGPU unavailable",
+  recovery_restart: "Once parked, open User / System below and press Reboot once. If this happens again, send a screenshot of this card for support.",
+  waiting_for_network: "Waiting for network / automatic retry",
+  installing: "Installing eGPU package",
+  installed: "Installed · next start",
+  active: "eGPU running",
+  waiting_for_network_detail: "Keep an internet connection available. Installation retries automatically every 30 seconds.",
+  installing_detail: "Preparing the verified model and runtime. The current driving model continues running.",
+  installed_detail: "Installation is complete. The eGPU will be tried at the next ignition session; no restart is needed while driving.",
+  active_detail: "The eGPU is currently running the driving model.",
+  failure_dns: "Cannot resolve the download server address. Check the internet connection; retry is automatic.",
+  failure_clock: "Certificate not yet valid. Waiting for the device clock/network to recover; retry is automatic.",
+  failure_network: "Download connection interrupted. Retrying automatically.",
+  failure_server: "The download server is temporarily unavailable. Retrying automatically.",
+  failure_certificate: "Server certificate verification failed. The download was stopped; verification remains enabled.",
+  failure_download: "The server refused the download or the requested file is unavailable.",
+  failure_storage: "Not enough free storage to install the eGPU package.",
+  failure_install: "The eGPU package could not be installed or verified. The saved diagnostic report contains the cause.",
+  failure_rejected: "This model was blocked after an earlier runtime failure. The saved diagnostic report contains the cause.",
+  failure_runtime: "The eGPU could not start or continue running. The internal model is selected.",
+  failure_pcie: "The eGPU connection could not start. The internal model is selected.",
+  failure_timeout: "The eGPU took too long to respond. The internal model is selected.",
+  failure_usb: "Communication with the eGPU was interrupted. The internal model is selected.",
   checking_detail: "Checking the model catalog. You can keep using openpilot.",
   downloading_detail: "Download may continue while driving. Do not restart or power off until it finishes.",
   verifying_detail: "Checking the complete file. This can take a moment.",
@@ -22,7 +45,7 @@ const FALLBACK_STRINGS = {
   waiting_for_ignition_detail: "Keep the car parked and ignition on, then restart to compile.",
   compiling_detail: "Keep the car parked and ignition on. The screen will update when compilation finishes.",
   compiled_detail: "The eGPU big model is compiled and will be selected automatically.",
-  error_detail: "The internal model remains available. Check the connection and try again on the next restart.",
+  error_detail: "The eGPU is not ready. Send a screenshot of this card for support.",
   restart: "Restart & compile",
   restart_confirm: "Park the car and turn ignition on. Restart now to compile the eGPU big model?",
   restart_requested: "Restart requested. Compilation will begin during boot.",
@@ -58,6 +81,8 @@ function modelDisplayName(status) {
   if (explicitName) return explicitName;
 
   const modelId = String(status?.model_id || "").toLowerCase();
+  if (modelId.includes("4bfb5340-e20cde17")) return "Mountain Dew v1 (870a4823)";
+  if (modelId.includes("pr39047") || modelId.includes("mdm-v1")) return "Mountain Dew v1";
   if (modelId.includes("pr38932") || modelId.includes("cinque-v3")) return "Cinque v3";
   if (modelId.includes("pr38823") || modelId.includes("cinque-v2")) return "Cinque v2";
   if (modelId.includes("pr38771") || modelId.includes("cinque-terre")) return "Cinque Terre";
@@ -83,9 +108,12 @@ function render(status = lastStatus) {
 
   const state = String(status.state || "checking");
   const percent = Number(status.progress);
-  const running = ["checking", "downloading", "verifying", "compiling"].includes(state);
+  const running = ["checking", "downloading", "verifying", "compiling", "waiting_for_network", "installing"].includes(state);
   const stateEl = document.getElementById("egpuModelState");
   const detailEl = document.getElementById("egpuModelDetail");
+  const recoveryEl = document.getElementById("egpuModelRecovery");
+  recoveryEl.hidden = true;
+  recoveryEl.textContent = "";
   const progressEl = document.getElementById("egpuModelProgress");
   const progressBar = document.getElementById("egpuModelProgressBar");
   const amountEl = document.getElementById("egpuModelAmount");
@@ -128,8 +156,17 @@ function render(status = lastStatus) {
   card.dataset.state = state;
   card.classList.toggle("is-running", running);
   document.getElementById("egpuModelTitle").textContent = modelDisplayTitle(status);
-  stateEl.textContent = t(state);
-  detailEl.textContent = t(`${state}_detail`);
+  const active = status.active && ["compiled", "installed"].includes(state);
+  const runtimeFailure = state === "error" && ["runtime", "pcie", "timeout", "usb"].includes(status.error_code);
+  stateEl.textContent = t(active ? "active" : runtimeFailure ? "runtime_error" : state);
+  const failureKey = `failure_${status.error_code}`;
+  // Raw worker stages and exception messages remain in the API and saved logs.
+  // The card explains the next user action, including a safe fallback for new error codes.
+  detailEl.textContent = status.error_code
+    ? t(Object.hasOwn(FALLBACK_STRINGS, failureKey) ? failureKey : "error_detail")
+    : t(active ? "active_detail" : `${state}_detail`);
+  recoveryEl.hidden = !runtimeFailure;
+  recoveryEl.textContent = runtimeFailure ? t("recovery_restart") : "";
 
   const showProgress = state === "downloading" && Number.isFinite(percent);
   progressEl.hidden = !showProgress;

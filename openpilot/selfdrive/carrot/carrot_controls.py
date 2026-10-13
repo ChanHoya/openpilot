@@ -10,7 +10,6 @@ class CarrotControls:
     self.lat_suspend_hold_t = 0.0
 
   def lat_suspend_control(self, CS, latActive, model_v2=None):
-    suspend_angle = float(self.params.get_int("LatSuspendAngleDeg"))
     resume_angle  = 15
     delay_sec     = 1.0
     hold_sec      = 0.5
@@ -23,12 +22,12 @@ class CarrotControls:
       lane_visible = bool(lane_probs[1] >= 0.3 or lane_probs[2] >= 0.3)
 
     # 1) enter condition timer
-    enter_cond = CS.steeringPressed and abs(CS.steeringAngleDeg) > suspend_angle
-    # 커브길에서 차선이 30% 이상 인식되고 깜빡이를 켜지 않은 경우 수동 조향 중에도 자동조향 유지
-    if lane_visible and not blinker_on:
-      enter_cond = False
-
     if not self.lat_suspend_active:
+      enter_cond = CS.steeringPressed and abs(CS.steeringAngleDeg) > float(self.params.get_int("LatSuspendAngleDeg"))
+      # 커브길에서 차선이 30% 이상 인식되고 깜빡이를 켜지 않은 경우 수동 조향 중에도 자동조향 유지
+      if lane_visible and not blinker_on:
+        enter_cond = False
+
       if enter_cond:
         self.lat_suspend_enter_t += DT_CTRL
         if self.lat_suspend_enter_t >= delay_sec:

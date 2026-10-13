@@ -222,7 +222,7 @@ Eco caps lead response at 2 and Safe at 3; Normal and High retain the selected v
 
 `CruiseGapLevels` (Gap cycle levels) limits button cycling to 2 through the vehicle-supported maximum, which is the default. 2 uses TF1 and TF2; 3 uses TF1 through TF3. It applies on the next gap-button press and preserves unused TF and following responsiveness values. Applies with openpilot longitudinal control.
 
-`TFollowGap1` through `TFollowGap4` are stored in hundredths of a second. Lower values reduce the time gap. Use `LeadAccelResponse` for acceleration response: levels 1–3 are gradual, 4 is quick, and 5 retains maximum response. Added deceleration margin does not accumulate.
+`TFollowGap1` through `TFollowGap4` are stored in hundredths of a second. Lower values reduce the time gap. Use `LeadAccelResponse` for acceleration response: levels 1–3 are gradual, 4 is quick, and 5 retains maximum response. Braking-onset distance is not separately remembered to enlarge the gap.
 
 `LeadAccelResponse`: Adjusts how the car follows a lead vehicle as it starts or speeds up. Lower levels close the gap more gradually; higher levels follow more quickly. Level 0 turns off the acceleration boost, and level 5 is the most responsive test setting. See [Following responsiveness](cruise-gap.md#lead-response) for details. Extra-headroom hold conditions apply up to 1.2 times TF distance (speed × TF + stopping distance), ease progressively from 1.2 to 1.5 times, and no longer pause recovery at or above 1.5 times regardless of lead speed.
 
@@ -237,7 +237,7 @@ Deceleration preview operates independently of the response level. During active
 
 `VEgoStopping` has a range of `10–100` and a default of `50`; `10` means `0.10 m/s`. Previously stored values below `10` are automatically raised to `10`, and control enforces the same minimum during driving.
 
-Hyundai/Kia CANFD with openpilot longitudinal control retains one stop retry by default after a confirmed speed rebound or sustained loss of deceleration. At low speed, elapsed time or distance alone does not trigger retry while deceleration continues. See [CANFD stopping control](cruise-gap.md#canfd-stopping).
+For Hyundai/Kia CANFD openpilot longitudinal control, aReqRaw and aReqValue become zero in the first StopReq frame, so this setting does not change transmitted acceleration while StopReq remains active. Automatic release/retry is removed.
 
 On supported Tesla vehicles with the additional vehicle bus detected, the device's **alpha longitudinal** (`AlphaLongitudinalEnabled`) toggle also enables [automatic cruise set-speed adjustment](tesla.md#automatic-cruise-speed) to the vehicle-reported limit. Navigation/Carrot speed control takes precedence and pauses DAS-based adjustment until it ends and the limit is stable again; any manual pause remains in effect. Turning the right speed wheel pauses it; an opposite-direction wheel gesture within one second or disengaging and re-engaging resumes it. There is no separate Carrot Web setting for this feature.
 
@@ -275,6 +275,8 @@ With `HyundaiCameraSCC=0` and no camera-SCC configuration already applied to the
 For dPath RadarD, `EnableRadarTracks=-2` is the vision-only experiment; `-1` always uses SCC without vision matching; `0` also always uses SCC; `1` matches front radar without SCC; `2` matches front radar plus low-speed SCC; and `3` uses SCC unconditionally after front-radar/vision matching fails. Matching modes use central vision at probability `0.40` or higher when matching fails. Modes `-1`, `0`, and `3` use vision only when SCC is absent. All SCC association ignores lateral position. SCC-only modes `-1` and `0` apply no additional dPath gate to vision fallback. Legacy Mando radar variants with 32 or 64 slots are handled automatically. A new stationary front lead requires vision or a matching corner detection; continuous front-radar observation alone cannot authorize it. When a separate measured moving target agrees with the visual position and speed, that vision cannot authorize or retain a different stationary reflection. Corner corroboration must match the selected stationary object itself. For a front candidate without corresponding corner corroboration, a vision-support interruption beyond the permitted brief hold resets both the pending object and its confirmation time before confirmation starts again. An already selected moving front can remain L1 within a bounded vision-uncertainty range while the same measured track stays physically continuous; a fixed 8 m difference alone no longer discards it. A new nearer match can replace it immediately, and gaps or physical jumps reset this allowance. A distant stopped front can qualify on a gentle curve through continuous measured radar history and repeated visual position agreement. Continuous corner position/speed evidence participates in that decision. Confirmed stationary fronts can bridge visual-range noise within distance and time limits while publishing radar distance and speed.
 
 `RadarTrackFlip` offers `0: Normal` (default) and `1: Invert left/right`. It inverts both lateral position and lateral velocity of front radar tracks for lead selection and display, preserving SCC, corner radar and vision. There is no automatic inversion by vehicle model; use it only after confirming a left/right mismatch. Restart the vehicle or reboot the device to apply it at the next OnRoad start. See [radar left/right inversion](radar.md#radar-track-flip).
+
+In versions supporting Bosch MRRevo14F reception, detecting the Bosch message group on a Bosch MRRevo14F candidate platform (vehicle-validated only on the Elantra AD) with `EnableRadarTracks=1`–`3` enables passive reception of tracks already being transmitted, skipping startup radar-activation UDS writes and SCC ECU communication disabling. `EnableRadarTracksResult` is not updated; check actual reception, CAN validity and radar errors. Passive reception does not mean all vehicle control is disabled. See the [Bosch passive reception exception](radar.md#bosch-passive-reception).
 
 In modes `EnableRadarTracks=1`–`3`, a confirmed departing front lead can receive bounded future headway relief in ACC when outward radar motion and a visual switch to a farther vehicle agree. See [predicted CUT-OUT behavior](radar.md).
 
@@ -375,6 +377,14 @@ Check storage use for recording and network use, heat, and privacy before enabli
 `SoundVolumeAdjust` changes general sound volume. DM's first audible warning has a 70% minimum output gain; its final warning always uses 100%, regardless of volume settings or ambient-noise attenuation. The preceding visual-only notice remains silent. See [driver monitoring](driver-monitoring.md) for details.
 
 Experimental DM switches to standard monitoring for 20 seconds only when moving traffic first appears after an absence. Additional vehicles do not extend it; experimental monitoring then resumes, with no empty-road bonus while traffic remains.
+
+## Signal Assistance Mode (Trial)
+
+`SignalAssistMode` defaults to `0`. Mode `0` disables auxiliary signals; `1` enables recognition, display, alerts and the stopped-red departure veto; `2` also enables moving-red preparation.
+
+Mode `2` gradually requests acceleration toward approximately −0.5m/s² after qualifying red evidence, with no lead, pedal input or turn and a speed above 5km/h and below 82km/h. At night, at least two persistent red lamps must have compatible placement and road-direction support; inferred housing size is not used as a stopping distance.
+
+Preparation releases when red evidence disappears or conflicts with green. The existing driving model still controls stopping toward the stop line; this trial does not guarantee deceleration or stopping at every red signal.
 
 ## Safe adjustment order
 

@@ -147,10 +147,11 @@ def test_runtime_separate_endpoint_and_fresh_vehicle_context(tmp_path):
 
 @pytest.mark.parametrize('lead', [False, True])
 @pytest.mark.parametrize('mode', ['acc', 'blended'])
-def test_actual_planner_red_wins_model_go_lead_and_user_stop(lead, mode):
+def test_actual_planner_red_wins_model_go_outside_lead_range_and_user_stop(lead, mode):
   cls, _ = planner_class((REPO/'openpilot/selfdrive/carrot/carrot_functions.py').read_text(encoding='utf-8'))
   p = cls(start_guard=SignalStartGuard())
   sm = inputs(lead=lead)
+  sm['radarState'].leadOne.dRel = 102.
   warnings = []
   for i in range(30):
     t = i*.05
@@ -161,7 +162,7 @@ def test_actual_planner_red_wins_model_go_lead_and_user_stop(lead, mode):
     if i >= 3:
       assert p.start_decision.hold and p.v_cruise == 0 and p.stop_dist == 0 and p.xState.name == 'e2eStopped'
       assert p.mode == 'acc'
-  assert warnings.count('audioRefuse') == 1
+  assert warnings.count('audioRefuse') == (0 if lead else 1)
   sm['carState'].gasPressed = True
   p.update(sm, 80., 'acc', start_observation=observation(2),
            start_context=dict(now=2, enabled=True, valid=True, drive=True))
@@ -183,7 +184,7 @@ def test_actual_planner_green_does_not_override_original_stop():
 @pytest.mark.parametrize('mode', ['acc', 'blended'])
 @pytest.mark.parametrize('model_go', [False, True])
 @pytest.mark.parametrize('inhibit', ['none', 'left_blinker', 'soft_hold', 'detect_only'])
-def test_single_transition_leaves_departure_to_original_planner(mode, model_go, inhibit):
+def test_confirmed_transition_supplies_normal_departure_with_driver_gates(mode, model_go, inhibit):
   from openpilot.selfdrive.carrot.tests.test_signal_start_group import SMALL, RIGHT
 
   cls, _ = planner_class((REPO/'openpilot/selfdrive/carrot/carrot_functions.py').read_text(encoding='utf-8'))
@@ -210,7 +211,7 @@ def test_single_transition_leaves_departure_to_original_planner(mode, model_go, 
     if 4 <= i < 20:
       assert p.start_decision.hold and p.xState.name == 'e2eStopped' and p.v_cruise == 0
   assert releases == ['green_transition'] and not p.start_decision.hold
-  if model_go and inhibit == 'none':
+  if inhibit == 'none':
     assert p.xState.name == 'e2eCruise' and p.v_cruise > 0
   elif inhibit == 'soft_hold':
     # Soft hold is carried separately from the cruise speed setting.

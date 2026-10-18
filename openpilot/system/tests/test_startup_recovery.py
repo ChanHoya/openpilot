@@ -309,6 +309,31 @@ def test_error_pages_wrap_without_losing_long_paths(monkeypatch):
   assert all(len(page) <= 4 and all(len(line) <= 63 for line in page) for page in pages)
 
 
+def test_recovery_rollback_reverts_commit_and_reboots(checkouts, monkeypatch):
+  device, target = checkouts
+  update = startup_recovery.RecoveryUpdate(device, reboot=lambda: None)
+  update._run()
+  assert git(device, 'rev-parse', 'HEAD') == target
+
+  reboots = []
+  rebuild_requests = []
+  monkeypatch.setattr(startup_recovery, 'request_full_rebuild', lambda: rebuild_requests.append(True))
+  update.reboot = lambda: reboots.append(git(device, 'rev-parse', 'HEAD'))
+  update._rollback()
+
+  assert len(reboots) == 1
+  assert reboots[0] != target
+  assert (device / 'source.txt').read_text() == 'old\n'
+  assert rebuild_requests == [True]
+  assert update.state == ('rollback_rebooting', reboots[0][:10])
+
+
+def test_busy_recovery_rejects_concurrent_rollback(tmp_path):
+  update = startup_recovery.RecoveryUpdate(tmp_path)
+  update._set('updating', '')
+  assert not update.start_rollback()
+
+
 @pytest.mark.parametrize('status', startup_recovery.BUSY_STATES + ('idle', 'waiting', 'failed'))
 def test_display_keeps_original_error_in_every_update_state(monkeypatch, status):
   pytest.importorskip('pyray')
@@ -318,10 +343,11 @@ def test_display_keeps_original_error_in_every_update_state(monkeypatch, status)
   monkeypatch.setattr(ui.rl, 'draw_text_ex', lambda font, text, *args: drawn.append(text))
   monkeypatch.setattr(ui.rl, 'clear_background', lambda *args: None)
   monkeypatch.setattr(ui.rl, 'draw_rectangle_rounded', lambda *args: None)
-  rebuild, update, error = ui.draw_screen(None, 536, 240, (status, 'Update status'), 'Build failed', 'host:6999',
-                                         [['fatal error: missing header']])
+  rebuild, rollback, update, error = ui.draw_screen(None, 536, 240, (status, 'Update status'), 'Build failed', 'host:6999',
+                                                   [['fatal error: missing header']])
   assert 'fatal error: missing header' in drawn and 'Update status' in drawn
-  assert ui.REBUILD_KO in drawn and ui.BUTTON_KO in drawn
+  assert ui.REBUILD_KO in drawn and ui.ROLLBACK_KO in drawn and ui.BUTTON_KO in drawn
   assert error.y + error.height <= rebuild.y
-  assert rebuild.x + rebuild.width < update.x
+  assert rebuild.x + rebuild.width < rollback.x
+  assert rollback.x + rollback.width < update.x
   assert update.x + update.width <= 536 and update.y + update.height <= 240

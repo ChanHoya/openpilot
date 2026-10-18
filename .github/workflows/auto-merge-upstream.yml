@@ -1,0 +1,84 @@
+name: Auto Merge Upstream & Validate
+
+on:
+  schedule:
+    # 매일 UTC 19:00 (한국 시간 새벽 4:00) 정기 실행
+    - cron: '0 19 * * *'
+  workflow_dispatch: # GitHub Actions 웹 페이지에서 수동 트리거 지원
+
+permissions:
+  contents: write
+
+jobs:
+  merge-and-validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout ChanHoya/openpilot
+        uses: actions/checkout@v4
+        with:
+          ref: carrot-wip
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git User
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch Upstream Repository
+        run: |
+          git remote add upstream https://github.com/ajouatom/openpilot.git || true
+          git fetch upstream carrot-wip
+
+      - name: Check for New Upstream Commits
+        id: check_updates
+        run: |
+          BEHIND_COUNT=$(git rev-list --count HEAD..upstream/carrot-wip)
+          echo "Upstream is ahead by $BEHIND_COUNT commit(s)."
+          if [ "$BEHIND_COUNT" -eq 0 ]; then
+            echo "Already up to date with upstream/carrot-wip."
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          else
+            echo "New commits found in upstream. Proceeding with merge."
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Attempt Git Merge
+        if: steps.check_updates.outputs.has_changes == 'true'
+        run: |
+          echo "Attempting to merge upstream/carrot-wip into carrot-wip..."
+          if ! git merge upstream/carrot-wip -m "Merge upstream/carrot-wip into carrot-wip (auto-merge)"; then
+            echo "::error::Merge conflict encountered! Aborting merge to prevent breaking carrot-wip."
+            git merge --abort
+            exit 1
+          fi
+
+      - name: Set up Python
+        if: steps.check_updates.outputs.has_changes == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Validate Python Syntax (Compileall)
+        if: steps.check_updates.outputs.has_changes == 'true'
+        run: |
+          echo "Verifying syntax across the openpilot package..."
+          python -m compileall -q openpilot/
+
+      - name: Install Test Dependencies
+        if: steps.check_updates.outputs.has_changes == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pyray
+
+      - name: Run Core Recovery & Control Tests
+        if: steps.check_updates.outputs.has_changes == 'true'
+        run: |
+          echo "Running core startup recovery and carrot tests..."
+          pytest openpilot/system/tests/test_startup_recovery.py openpilot/selfdrive/carrot/tests/test_carrot_controls.py
+
+      - name: Push to ChanHoya/openpilot
+        if: steps.check_updates.outputs.has_changes == 'true'
+        run: |
+          echo "All validation checks passed! Pushing merged carrot-wip..."
+          git push origin carrot-wip

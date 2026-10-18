@@ -27,10 +27,13 @@ LABELS = {
   'rebooting': ('업데이트 완료 · 재부팅 중', 'Update complete · rebooting'),
   'cleaning': ('빌드 정리 중 · 전원을 유지하세요', 'Cleaning build · keep power connected'),
   'rebuild_rebooting': ('재부팅 후 다시 빌드합니다', 'Rebooting to rebuild'),
+  'rolling_back': ('이전 커밋 롤백 중 · 전원을 유지하세요', 'Rolling back · keep power connected'),
+  'rollback_rebooting': ('롤백 완료 · 재부팅 중', 'Rollback complete · rebooting'),
 }
 AUTO_KO = '30초마다 수정본 확인 · 리빌드는 재부팅 후 수 분 소요'
 BUTTON_KO = 'Git pull 후 재부팅'
 REBUILD_KO = '리빌드 · 재부팅'
+ROLLBACK_KO = '롤백 · 재부팅'
 ERROR_KO = '시작 오류 · 누르면 다음 내용'
 
 
@@ -150,10 +153,15 @@ def draw_screen(font, width, height, state, reason, address, pages, page=0):
   line('Auto-check every 30s · reboot only after a new update', 173, 10, rl.LIGHTGRAY)
   buttons = []
   busy = status in BUSY_STATES
-  for left, ko, en in ((16, REBUILD_KO, 'Clean build & reboot'), (274, BUTTON_KO, 'Git pull & reboot')):
-    button = rl.Rectangle(x + left * scale, y + 188 * scale, 246 * scale, 44 * scale)
+  btn_specs = (
+    (16, 158, REBUILD_KO, 'Clean build & reboot', rl.Color(33, 104, 200, 255)),
+    (189, 158, ROLLBACK_KO, 'Rollback & reboot', rl.Color(190, 85, 35, 255)),
+    (362, 158, BUTTON_KO, 'Git pull & reboot', rl.Color(33, 104, 200, 255)),
+  )
+  for left, width_btn, ko, en, btn_color in btn_specs:
+    button = rl.Rectangle(x + left * scale, y + 188 * scale, width_btn * scale, 44 * scale)
     buttons.append(button)
-    rl.draw_rectangle_rounded(button, .15, 8, rl.DARKGRAY if busy else rl.Color(33, 104, 200, 255))
+    rl.draw_rectangle_rounded(button, .15, 8, rl.DARKGRAY if busy else btn_color)
     for text, top, size in ((ko, 192, 18), (en, 215, 11)):
       size *= scale
       tw = rl.measure_text_ex(font, text, size, 0).x
@@ -185,7 +193,7 @@ def main():
   rl.init_window(width, height, 'Startup recovery')
   rl.set_target_fps(20)
   rl.set_exit_key(0)
-  characters = ''.join(ko + en for ko, en in LABELS.values()) + AUTO_KO + BUTTON_KO + REBUILD_KO + ERROR_KO + reason + error
+  characters = ''.join(ko + en for ko, en in LABELS.values()) + AUTO_KO + BUTTON_KO + REBUILD_KO + ROLLBACK_KO + ERROR_KO + reason + error
   codepoints = sorted(set(range(32, 127)) | {ord(c) for c in characters if ord(c) >= 32})
   glyph_buffer = rl.ffi.new('int[]', codepoints)
   font = rl.load_font_ex(str(ROOT / 'openpilot/selfdrive/assets/fonts/Pretendard-Medium.ttf'),
@@ -230,18 +238,23 @@ def main():
         update.start(automatic=True)
         next_check = time.monotonic() + 30
       rl.begin_drawing()
-      rebuild_button, update_button, error_area = draw_screen(font, width, height, update.state, reason, label_with_port(6999), pages, page)
+      rebuild_button, rollback_button, update_button, error_area = draw_screen(font, width, height, update.state, reason, label_with_port(6999), pages, page)
       rl.end_drawing()
       # Poll the loaded COMMA backend even if evdev is unavailable; desktop already polls.
       poll_recovery_input()
       if touch.pressed():
         position = rl.get_touch_position(0) if touch.fd is not None else rl.get_mouse_position()
-        hit = next((name for name, area in (('rebuild', rebuild_button), ('update', update_button), ('error', error_area))
+        hit = next((name for name, area in (('rebuild', rebuild_button), ('rollback', rollback_button), ('update', update_button), ('error', error_area))
                     if rl.check_collision_point_rec(position, area)), 'outside')
         # Save the hit and coordinates before starting an action that may reboot.
         touch_log.record('press', sync=True, x=position.x, y=position.y, hit=hit, state=update.state[0])
-        if hit in ('rebuild', 'update'):
-          accepted = update.start_rebuild() if hit == 'rebuild' else update.start()
+        if hit in ('rebuild', 'rollback', 'update'):
+          if hit == 'rebuild':
+            accepted = update.start_rebuild()
+          elif hit == 'rollback':
+            accepted = update.start_rollback()
+          else:
+            accepted = update.start()
           touch_log.record('action', sync=True, hit=hit, accepted=accepted, state=update.state[0])
         elif hit == 'error':
           page = (page + 1) % len(pages)

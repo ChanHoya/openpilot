@@ -86,9 +86,27 @@ class SoftwareLayout(Widget):
   def _render(self, rect):
     self._scroller.render(rect)
 
+  def _can_update(self) -> bool:
+    """Allow updates when offroad OR when safely stopped (P gear or standstill) and not engaged."""
+    if ui_state.is_offroad():
+      return True
+    try:
+      if getattr(ui_state, "engaged", False):
+        return False
+      sm = getattr(ui_state, "sm", None)
+      if sm is not None and "carState" in sm.recv_frame and sm.recv_frame["carState"] > 0:
+        cs = sm["carState"]
+        if getattr(cs, "standstill", False) or getattr(cs, "vEgo", 1.0) < 0.1 or getattr(cs, "gearShifter", 0) == 1:
+          return True
+    except Exception:
+      pass
+    return False
+
   def _update_state(self):
-    # Show/hide onroad warning
-    self._onroad_label.set_visible(ui_state.is_onroad())
+    can_update = self._can_update()
+
+    # Show/hide onroad warning (only show when moving or engaged)
+    self._onroad_label.set_visible(not can_update)
 
     # Update current version and release notes
     current_desc = ui_state.params.get("UpdaterCurrentDescription") or ""
@@ -97,7 +115,7 @@ class SoftwareLayout(Widget):
     self._version_item.set_description(current_release_notes)
 
     # Update download button visibility and state
-    self._download_btn.set_visible(ui_state.is_offroad())
+    self._download_btn.set_visible(can_update)
 
     updater_state = ui_state.params.get("UpdaterState") or "idle"
     failed_count = ui_state.params.get("UpdateFailedCount") or 0
@@ -139,7 +157,7 @@ class SoftwareLayout(Widget):
     self._branch_btn.action_item.set_value(current_branch)
 
     # Update install button
-    self._install_btn.set_visible(ui_state.is_offroad() and update_available)
+    self._install_btn.set_visible(can_update and update_available)
     if update_available:
       new_desc = ui_state.params.get("UpdaterNewDescription") or ""
       new_release_notes = (ui_state.params.get("UpdaterNewReleaseNotes") or b"").decode("utf-8", "replace")

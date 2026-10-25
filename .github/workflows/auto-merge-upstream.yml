@@ -18,7 +18,7 @@ jobs:
         with:
           ref: carrot-wip
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.AUTOMERGE_PAT || secrets.GITHUB_TOKEN }}
 
       - name: Configure Git User
         run: |

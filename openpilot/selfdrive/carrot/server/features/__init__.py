@@ -8,6 +8,7 @@ from . import (
   egpu_model,
   intro,
   mapbox_tokens,
+  navigation,
   params,
   screenrecord,
   settings,
@@ -56,6 +57,7 @@ def register_all(app: web.Application) -> None:
   autotune.register(app)
   xiaoge.register(app)
   mapbox_tokens.register(app)
+  navigation.register(app)
   vision_test.register(app)
   vision_diag.register(app)
   web_sound.register(app)

@@ -76,3 +76,48 @@ def test_normal_accel_limit_keeps_existing_small_step() -> None:
     0.5,
     None,
   ) == pytest.approx(0.45)
+
+
+def test_lead_predecel_requests_bounded_negative_accel_for_closing_lead() -> None:
+  from openpilot.selfdrive.controls.lib.cutin_predecel import get_lead_predecel_accel_limit
+  radar_state = SimpleNamespace(
+    leadOne=SimpleNamespace(
+      status=True,
+      radar=True,
+      radarTrackId=1,
+      dRel=30.0,
+      vRel=-5.0,  # TTC = 6.0s
+      aLeadK=-0.5,
+    )
+  )
+  limit = get_lead_predecel_accel_limit(radar_state, v_ego=20.0)
+  assert limit is not None
+  assert -0.50 <= limit <= -0.15
+
+
+@pytest.mark.parametrize(
+  "overrides,v_ego",
+  (
+    ({"status": False}, 20.0),
+    ({"radar": False}, 20.0),
+    ({"radarTrackId": -1}, 20.0),
+    ({"dRel": 8.0}, 20.0),    # too close (<10m)
+    ({"vRel": -0.2}, 20.0),   # closing too slowly
+    ({"aLeadK": -0.1}, 20.0),  # lead not decelerating
+    ({}, 4.0),                 # v_ego <= 5.0 m/s
+  ),
+)
+def test_lead_predecel_ignores_ineligible_conditions(overrides, v_ego) -> None:
+  from openpilot.selfdrive.controls.lib.cutin_predecel import get_lead_predecel_accel_limit
+  values = {
+    "status": True,
+    "radar": True,
+    "radarTrackId": 1,
+    "dRel": 30.0,
+    "vRel": -3.0,
+    "aLeadK": -0.5,
+  }
+  values.update(overrides)
+  radar_state = SimpleNamespace(leadOne=SimpleNamespace(**values))
+  assert get_lead_predecel_accel_limit(radar_state, v_ego=v_ego) is None
+

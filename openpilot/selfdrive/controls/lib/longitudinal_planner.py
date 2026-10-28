@@ -15,6 +15,7 @@ from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_
 from openpilot.selfdrive.controls.lib.cutin_predecel import (
   apply_cutin_predecel_accel_limit,
   get_cutin_predecel_accel_limit,
+  get_lead_predecel_accel_limit,
 )
 from openpilot.selfdrive.controls.lib.longitudinal_preview import (
   apply_preview_target,
@@ -221,12 +222,20 @@ class LongitudinalPlanner:
       if not reset_state and not sm['carState'].gasPressed
       else None
     )
+    lead_predecel_limit = (
+      get_lead_predecel_accel_limit(sm['radarState'], v_ego)
+      if not reset_state and not sm['carState'].gasPressed and not force_slow_decel
+      else None
+    )
+    active_predecel_limits = [lim for lim in (cutin_predecel_limit, lead_predecel_limit) if lim is not None]
+    predecel_limit = min(active_predecel_limits) if active_predecel_limits else None
+
     # clip limits, cannot init MPC outside of bounds
     accel_limits_turns[0] = min(accel_limits_turns[0], self.a_desired + 0.05)
     accel_limits_turns[1] = apply_cutin_predecel_accel_limit(
       accel_limits_turns[1],
       self.a_desired,
-      cutin_predecel_limit,
+      predecel_limit,
     )
 
     lead_track_frames = self.update_lead_tracks(sm['radarState'])

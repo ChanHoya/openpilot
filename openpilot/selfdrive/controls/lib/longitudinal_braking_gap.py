@@ -49,10 +49,17 @@ class LeadComfortState:
                 and self.distance - stop_distance > v * (base_tf + 0.2)
                 and comfort_path_has_reserve(ego_speeds, physical_gaps, danger_margins, times, stop_distance))
     # Hazard withdrawal is immediate. This is a preference, never a brake cap.
-    self.relief = min(1.0, self.relief + dt / 0.5) if eligible else 0.0
-    if not eligible:
+    if not comfort_path_has_reserve(ego_speeds, physical_gaps, danger_margins, times, stop_distance) or not enabled:
+      self.relief = 0.0
+    elif eligible:
+      self.relief = min(1.0, self.relief + dt / 0.5)
+    else:
+      self.relief = max(0.0, self.relief - dt / 0.8)
+
+    if self.relief <= 0.0:
       return np.zeros_like(ego_speeds)
     return self.relief * min(0.4, max(0.0, base_tf - 0.7)) * np.maximum(ego_speeds, 0.0)
+
 
 
 def braking_gap_reference(obstacles, margins, ego_speeds):

@@ -63,3 +63,18 @@ def test_nonfinite_prediction_withdraws_comfort_relief(field):
   relief(state)
   assert state.relief > 0.
   assert not relief(state, **{field: np.full(13, np.nan)}).any()
+
+
+def test_comfort_relief_ramps_down_smoothly_when_ineligible_with_reserve():
+  state = LeadComfortState()
+  state.age, state.distance, state.relative_speed = 2., 40., -1.
+  for _ in range(20):
+    relief(state)
+  assert state.relief == 1.0
+
+  # Lead stops braking (lead_accel = 0.0), so eligible becomes False, but reserve is safe
+  res1 = relief(state, lead_accel=0.0)
+  # relief should ramp down smoothly, not drop instantly to 0
+  assert state.relief == pytest.approx(1.0 - 0.05 / 0.8)
+  assert res1[0] > 0.0
+

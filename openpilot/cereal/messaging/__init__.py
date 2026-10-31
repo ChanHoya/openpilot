@@ -239,6 +239,9 @@ class SubMaster:
   def __getitem__(self, s: str) -> capnp.lib.capnp._DynamicStructReader:
     return self.data[s]
 
+  def __contains__(self, s: str) -> bool:
+    return s in self.data
+
   def _check_avg_freq(self, s: str) -> bool:
     return SERVICE_LIST[s].frequency > 0.99 and (s not in self.ignore_average_freq) and (s not in self.ignore_alive)
 

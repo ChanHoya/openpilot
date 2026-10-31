@@ -32,7 +32,11 @@ from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.selfdrive.carrot.carrot_man_input import get_carrot_man
 from openpilot.selfdrive.carrot.curve_speed import curve_speed
 from openpilot.selfdrive.carrot.radar_motion.controller import DPathRadarController
-from openpilot.selfdrive.controls.lib.cutin_predecel import apply_cutin_predecel_accel_limit, get_cutin_predecel_accel_limit
+from openpilot.selfdrive.controls.lib.cutin_predecel import (
+  apply_cutin_predecel_accel_limit,
+  get_cutin_predecel_accel_limit,
+  get_lead_predecel_accel_limit,
+)
 from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
 from openpilot.selfdrive.controls.lib.turn_accel import get_future_curvature, limit_accel_in_turns
 from openpilot.selfdrive.modeld.constants import ModelConstants
@@ -70,6 +74,7 @@ def functions():
                'A_CRUISE_MIN': source_literal(planner_path, 'A_CRUISE_MIN'),
                'get_future_curvature': get_future_curvature, 'limit_accel_in_turns': limit_accel_in_turns,
                'get_cutin_predecel_accel_limit': get_cutin_predecel_accel_limit,
+               'get_lead_predecel_accel_limit': get_lead_predecel_accel_limit,
                'apply_cutin_predecel_accel_limit': apply_cutin_predecel_accel_limit,
                'RESET_DECEL_RAMP_TIME': source_literal(planner_path, 'RESET_DECEL_RAMP_TIME'),
                'N': source_literal('openpilot/selfdrive/controls/lib/longitudinal_mpc_lib/long_mpc.py', 'N')}

@@ -495,8 +495,32 @@ class LongitudinalMpc:
       # These are not used in ACC mode
       x[:], v[:], a[:], j[:] = 0.0, 0.0, 0.0, 0.0
 
-      #safe_distance = lead_0_obstacle[0] - get_safe_obstacle_distance(v_ego, comfort_brake, stop_distance)
-      self.lead_danger_factor = LEAD_DANGER_FACTOR
+      # Low-speed danger factor scaling: at low speeds (< 36 km/h, 10 m/s), scale danger factor
+      # from 0.55 up to LEAD_DANGER_FACTOR so that normal city following gaps (10-15m)
+      # do not falsely violate the danger zone constraint and trigger emergency braking.
+      self.lead_danger_factor = float(np.interp(v_ego, [4.0, 10.0], [0.55, LEAD_DANGER_FACTOR]))
+
+      if self.source in ('lead0', 'lead1'):
+        active_lead = radarstate.leadOne if self.source == 'lead0' else radarstate.leadTwo
+        d_rel = float(getattr(active_lead, 'dRel', 100.0))
+        v_rel = float(getattr(active_lead, 'vRel', 0.0))
+        a_lead = float(getattr(active_lead, 'aLeadK', 0.0))
+        ttc = d_rel / max(-v_rel, 0.1) if v_rel < -0.1 else 100.0
+        is_emergency = (
+          ttc < 2.0
+          or d_rel < 4.5
+          or (a_lead < -2.8 and v_rel < -2.0)
+          or self.crash_cnt > 0
+        )
+        if is_emergency:
+          self.lead_danger_factor = LEAD_DANGER_FACTOR
+        elif not reset_state:
+          # At low speed in non-emergency following, bound minimum acceleration smoothly
+          # between -1.5 m/s^2 and ACCEL_MIN (-4.0 m/s^2) to provide comfortable, progressive
+          # deceleration instead of slamming full -4.0 m/s^2 friction braking.
+          comfort_a_min = float(np.interp(v_ego, [3.0, 7.0, 12.0], [-1.5, -2.0, ACCEL_MIN]))
+          self.params[:,0] = comfort_a_min
+
       self.params[:,5] = self.lead_danger_factor
 
     elif mode == 'blended':

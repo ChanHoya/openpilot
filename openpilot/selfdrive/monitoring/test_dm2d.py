@@ -845,3 +845,70 @@ def test_live_camera_response_defers_only_experimental_monitoring(monkeypatch, e
   else:
     assert all(p['dm2InteractionGraceRemaining'] == 0 for p in steady)
     assert packets[-1][1]['driverMonitoringState']['alertLevel'] == 'three'
+
+
+def test_night_low_light_no_face_pauses_driver_monitoring(monkeypatch):
+  """Verify DM suppresses alerts when driver face is undetected in nighttime/low-light conditions."""
+  clock = [100.0]
+  packets = []
+
+  class Params:
+    def get_bool(self, name):
+      return name == "DriverMonitoringEnabled"
+    def get_int(self, _):
+      return 0
+
+  class State(dict):
+    updated = {'carParams': False, 'radarState': True, 'driverStateV2': False}
+    logMonoTime = {'driverStateV2': 0}
+    def update(self, timeout):
+      clock[0] += .05
+    def all_checks(self, services):
+      return 'driverStateV2' not in services
+
+  cs = car.CarState.new_message(vEgo=20, canValid=True, gearShifter='drive')
+  model = log.ModelDataV2.new_message()
+  model.orientationRate.z = [0.] * 33
+  model.laneLineProbs = [0., 1., 1., 0.]
+
+  state = State(
+    carState=cs,
+    selfdriveState=log.SelfdriveState.new_message(enabled=True),
+    radarState=log.RadarState.new_message(),
+    modelV2=model.as_reader(),
+    roadCameraState=log.FrameData.new_message(exposureValPercent=75.0), # Night exposure
+    driverCameraState=log.FrameData.new_message(exposureValPercent=65.0),
+  )
+
+  class Done(Exception):
+    pass
+
+  class Rate:
+    frame = 0
+    def keep_time(self):
+      self.frame += 1
+      if self.frame >= 20: # 1 second
+        raise Done
+
+  class Publisher:
+    def send(self, service, packet):
+      assert service == 'driverMonitoringState'
+      packets.append(packet.to_dict())
+
+  monkeypatch.setattr(dm2d.messaging, 'SubMaster', checked_submaster(state), raising=False)
+  monkeypatch.setattr(dm2d.messaging, 'PubMaster', lambda *a: Publisher(), raising=False)
+  monkeypatch.setattr(dm2d.messaging, 'sub_sock', lambda *a, **kw: None, raising=False)
+  monkeypatch.setattr(dm2d.messaging, 'drain_sock', lambda *a, **kw: [], raising=False)
+  monkeypatch.setattr(dm2d, 'DmRatekeeper', lambda *a, **kw: Rate())
+  monkeypatch.setattr(dm2d.time, 'monotonic', lambda: clock[0])
+
+  with pytest.raises(Done):
+    dm2d.run_dm2(Params(), experimental=False)
+
+  assert len(packets) == 20
+  # Verify that night low-light condition with no face detected sets dm2Disabled and suppresses alerts
+  last_packet = packets[-1]['driverMonitoringState']
+  assert last_packet['dm2Disabled'] is True
+  assert last_packet['alertLevel'] == 'none'
+  assert last_packet['visionPolicyState']['awarenessPercent'] == 100
+

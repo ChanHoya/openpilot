@@ -222,9 +222,10 @@ class LongitudinalPlanner:
       if not reset_state and not sm['carState'].gasPressed
       else None
     )
+    get_lead_predecel = globals().get('get_lead_predecel_accel_limit', None)
     lead_predecel_limit = (
-      get_lead_predecel_accel_limit(sm['radarState'], v_ego)
-      if not reset_state and not sm['carState'].gasPressed and not force_slow_decel
+      get_lead_predecel(sm['radarState'], v_ego)
+      if get_lead_predecel is not None and not reset_state and not sm['carState'].gasPressed and not force_slow_decel
       else None
     )
     active_predecel_limits = [lim for lim in (cutin_predecel_limit, lead_predecel_limit) if lim is not None]
@@ -367,6 +368,26 @@ class LongitudinalPlanner:
       output_a_target = min(output_a_target_mpc, output_a_target_e2e)
       output_v_target_now = min(output_v_target_mpc, output_v_target_now_e2e)
       self.output_should_stop = output_should_stop_e2e or output_should_stop_mpc
+
+    if predecel_limit is not None:
+      output_a_target = min(output_a_target, accel_limits_turns[1])
+      self.a_desired = min(self.a_desired, output_a_target)
+
+    # Lead vehicle stopping latch: when already at near-standstill behind a stopped lead,
+    # latch stopping firmly to avoid creeping closer than stop_distance.
+    if sm is not None and carrot is not None:
+      try:
+        cs = sm['carState']
+        if not cs.gasPressed and cs.vEgo < 0.6:
+          lead_stop_dist = max(getattr(carrot, 'stop_distance', 5.0), 3.5)
+          lead_one = lead
+          if (lead_one.status and lead_one.radar and getattr(lead_one, 'radarTrackId', -1) >= 0
+              and getattr(lead_one, 'vLead', 0.0) < 0.3 and getattr(lead_one, 'dRel', 10.0) <= lead_stop_dist + 0.3):
+            self.output_should_stop = True
+            self.output_v_target_now = 0.0
+            output_a_target = min(output_a_target, -0.5)
+      except (KeyError, TypeError, AttributeError):
+        pass
 
     #for idx in range(2):
     #  accel_clip[idx] = np.clip(accel_clip[idx], self.prev_accel_clip[idx] - 0.05, self.prev_accel_clip[idx] + 0.05)

@@ -51,10 +51,18 @@ def long_control_state_trans(CP, active, long_control_state, v_ego,
         long_control_state = LongCtrlState.pid
 
     elif long_control_state in [LongCtrlState.starting, LongCtrlState.pid]:
-      if stopping_condition:
-        leadOne = radarState.leadOne
-        fcw_stop = leadOne.status and leadOne.dRel < 4.0
-        if a_ego > stopping_accel or fcw_stop:
+      leadOne = getattr(radarState, 'leadOne', None)
+      lead_close_stop = (
+        leadOne is not None
+        and bool(getattr(leadOne, 'status', False))
+        and bool(getattr(leadOne, 'radar', False))
+        and float(getattr(leadOne, 'vLead', 0.0)) < 0.3
+        and float(getattr(leadOne, 'dRel', 10.0)) < 3.5
+        and v_ego < 0.5
+      )
+      if stopping_condition or lead_close_stop:
+        fcw_stop = leadOne is not None and bool(getattr(leadOne, 'status', False)) and float(getattr(leadOne, 'dRel', 10.0)) < 4.0
+        if a_ego > stopping_accel or fcw_stop or lead_close_stop:
           long_control_state = LongCtrlState.stopping
         elif long_control_state == LongCtrlState.starting:
           long_control_state = LongCtrlState.stopping

@@ -222,10 +222,14 @@ def test_lead_two_can_refresh_independently_after_validation():
 def test_radar_state_override_delegates_everything_except_radar_state():
   class FakeSubMaster:
     def __init__(self):
+      self.data = {"carState": original}
       self.logMonoTime = {"radarState": 1}
 
     def __getitem__(self, service):
-      return original
+      return self.data[service]
+
+    def __contains__(self, service):
+      return service in self.data
 
   original = object()
   replacement = object()
@@ -235,6 +239,10 @@ def test_radar_state_override_delegates_everything_except_radar_state():
   assert view["radarState"] is replacement
   assert view["carState"] is original
   assert view.logMonoTime == {"radarState": 1}
+  assert "radarState" in view
+  assert "carState" in view
+  assert "nonexistent" not in view
+  assert 0 not in view
 
 
 def test_debug_reason_names_match_longitudinal_plan_schema():

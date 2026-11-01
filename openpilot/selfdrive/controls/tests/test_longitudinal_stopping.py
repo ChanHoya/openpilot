@@ -31,12 +31,18 @@ def test_planner_uses_current_mpc_or_model_stop_without_early_override(mode, mpc
   start = next(i for i, n in enumerate(update.body) if isinstance(n, ast.If)
                and any(isinstance(x, ast.Assign) and any(ast.unparse(t) == 'self.output_should_stop' for t in x.targets)
                        for x in n.body))
-  state = SimpleNamespace(mpc=SimpleNamespace(mode=mode), update_coasting=lambda *args: None)
+  state = SimpleNamespace(
+    mpc=SimpleNamespace(mode=mode),
+    update_coasting=lambda *args: None,
+    apply_signal_stop_prepare=lambda *args: None,
+    apply_signal_start_guard=lambda *args: None,
+  )
   ns = {'self': state, 'output_should_stop_mpc': mpc_stop, 'output_should_stop_e2e': model_stop,
         'output_a_target_mpc': -.3, 'output_a_target_e2e': -.5, 'output_a_target_base': -.3,
         'output_v_target_mpc': .6, 'output_v_target_now_e2e': .4,
         'sm': None, 'carrot': None, 'v_cruise_kph': 0, 'v_cruise': 0, 'reset_state': False,
-        'force_slow_decel': False, 'coasting_turn_blocked': False, 'cutin_predecel_limit': None}
+        'force_slow_decel': False, 'coasting_turn_blocked': False, 'cutin_predecel_limit': None,
+        'predecel_limit': None, 'v_ego': 0.0}
   state.j_desired_trajectory = [0.]
   exec(compile(ast.Module(body=update.body[start:], type_ignores=[]), str(path), 'exec'), ns)
   assert state.output_should_stop == (mpc_stop if mode == 'acc' else mpc_stop or model_stop)

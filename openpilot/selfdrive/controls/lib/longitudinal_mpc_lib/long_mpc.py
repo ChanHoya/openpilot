@@ -482,6 +482,16 @@ class LongitudinalMpc:
           lead_0_follow_obstacle = lead_0_obstacle + cutout_obstacle_relief(
             radarstate.leadOne, v_ego, T_IDXS, t_follow, stop_distance,
           )
+
+      # When a valid lead exists ahead and is stopped, closing, or slower than cruise,
+      # the fake cruise obstacle must never preempt the physical lead obstacle.
+      if radarstate.leadOne.status:
+        lead_1_v = float(getattr(radarstate.leadOne, 'vLead', v_ego + getattr(radarstate.leadOne, 'vRel', 0.0)))
+        lead_1_d = float(getattr(radarstate.leadOne, 'dRel', 100.0))
+        lead_1_v_rel = float(getattr(radarstate.leadOne, 'vRel', 0.0))
+        if lead_1_d < 80.0 and (lead_1_v < 2.0 or lead_1_v_rel < 0.5 or lead_1_v < v_cruise):
+          cruise_obstacle = np.maximum(cruise_obstacle, lead_0_follow_obstacle)
+
       x_obstacles = np.column_stack([lead_0_follow_obstacle, lead_1_obstacle, cruise_obstacle, x2])
       # Only currently selected leadOne/leadTwo may constrain braking.
       # Entry snapshots and lane-change credit guards never add obstacles.
@@ -495,8 +505,33 @@ class LongitudinalMpc:
       # These are not used in ACC mode
       x[:], v[:], a[:], j[:] = 0.0, 0.0, 0.0, 0.0
 
-      #safe_distance = lead_0_obstacle[0] - get_safe_obstacle_distance(v_ego, comfort_brake, stop_distance)
-      self.lead_danger_factor = LEAD_DANGER_FACTOR
+      # City/mid/highway speed danger factor scaling:
+      # Keep danger factor progressively bounded across city speeds up to highway cruising (~110 km/h, 30 m/s)
+      # so that normal highway following gaps (40-50m) at 90-100 km/h and city gaps (15-25m) at 45-50 km/h
+      # do not falsely violate the danger zone constraint and trigger emergency braking.
+      self.lead_danger_factor = float(np.interp(v_ego, [4.0, 11.0, 20.0, 30.0], [0.55, 0.65, 0.70, 0.75]))
+
+      if self.source in ('lead0', 'lead1'):
+        active_lead = radarstate.leadOne if self.source == 'lead0' else radarstate.leadTwo
+        d_rel = float(getattr(active_lead, 'dRel', 100.0))
+        v_rel = float(getattr(active_lead, 'vRel', 0.0))
+        a_lead = float(getattr(active_lead, 'aLeadK', 0.0))
+        ttc = d_rel / max(-v_rel, 0.1) if v_rel < -0.1 else 100.0
+        is_emergency = (
+          ttc < 2.5
+          or d_rel < 6.0
+          or (a_lead < -3.0 and v_rel < -2.0)
+          or self.crash_cnt > 0
+        )
+        if is_emergency:
+          self.lead_danger_factor = LEAD_DANGER_FACTOR
+        elif not reset_state:
+          # In non-emergency following, bound minimum acceleration progressively
+          # across all driving speeds up to highway cruising (~110 km/h, 30 m/s) to provide comfortable,
+          # stable deceleration without slamming harsh friction braking on routine lead slowdowns.
+          comfort_a_min = float(np.interp(v_ego, [3.0, 8.0, 16.0, 30.0], [-1.5, -2.0, -2.5, -3.0]))
+          self.params[:,0] = comfort_a_min
+
       self.params[:,5] = self.lead_danger_factor
 
     elif mode == 'blended':

@@ -121,3 +121,89 @@ def test_lead_predecel_ignores_ineligible_conditions(overrides, v_ego) -> None:
   radar_state = SimpleNamespace(leadOne=SimpleNamespace(**values))
   assert get_lead_predecel_accel_limit(radar_state, v_ego=v_ego) is None
 
+
+def test_lead_predecel_handles_stopped_lead_at_speed() -> None:
+  from openpilot.selfdrive.controls.lib.cutin_predecel import get_lead_predecel_accel_limit
+  # Seg 2: ego at 47 km/h (13.0 m/s), approaching stopped lead at 80m
+  radar_state = SimpleNamespace(
+    leadOne=SimpleNamespace(
+      status=True,
+      radar=True,
+      radarTrackId=1,
+      dRel=80.0,
+      vRel=-12.0,
+      vLead=1.0,
+      aLeadK=-0.1,  # stationary lead doesn't have large negative aLeadK
+    )
+  )
+  limit = get_lead_predecel_accel_limit(radar_state, v_ego=13.0)
+  assert limit is not None
+  assert -1.50 <= limit <= -0.80
+
+
+def test_lead_predecel_handles_hard_braking_lead() -> None:
+  from openpilot.selfdrive.controls.lib.cutin_predecel import get_lead_predecel_accel_limit
+  # Seg 4: lead brakes hard at -1.8 m/s^2, 16m away closing at -3 m/s
+  radar_state = SimpleNamespace(
+    leadOne=SimpleNamespace(
+      status=True,
+      radar=True,
+      radarTrackId=1,
+      dRel=16.0,
+      vRel=-3.0,
+      vLead=8.0,
+      aLeadK=-1.8,
+    )
+  )
+  limit = get_lead_predecel_accel_limit(radar_state, v_ego=11.0)
+  assert limit is not None
+  assert limit <= -2.0  # firm proactive decel ceiling to prevent closing collision
+
+
+def test_apply_cutin_predecel_urgent_step() -> None:
+  # When predecel_limit is urgent (e.g. < -1.0), allow 0.08 smooth step
+  stepped = apply_cutin_predecel_accel_limit(1.0, 0.0, -1.5)
+  assert stepped == pytest.approx(-0.08)
+
+
+def test_lead_predecel_low_speed_gentle_follow_does_not_hard_brake() -> None:
+  from openpilot.selfdrive.controls.lib.cutin_predecel import get_lead_predecel_accel_limit
+  # Low speed follow: vEgo = 24 km/h (6.7 m/s), lead at 11m, vRel = -1.5 m/s, aLead = -1.5 m/s^2
+  # TTC = 11.0 / 1.5 = 7.3s. This is normal following, not an emergency stop!
+  radar_state = SimpleNamespace(
+    leadOne=SimpleNamespace(
+      status=True,
+      radar=True,
+      radarTrackId=1,
+      dRel=11.0,
+      vRel=-1.5,
+      vLead=5.2,
+      aLeadK=-1.5,
+    )
+  )
+  limit = get_lead_predecel_accel_limit(radar_state, v_ego=6.7)
+  # Must NOT return hard braking limit (<= -1.5)
+  assert limit is None or limit > -1.0
+
+
+def test_lead_predecel_low_speed_urgent_stop_returns_bounded_limit() -> None:
+  from openpilot.selfdrive.controls.lib.cutin_predecel import get_lead_predecel_accel_limit
+  # Low speed urgent stop: vEgo = 22 km/h (6.1 m/s), lead braking hard at -2.6 m/s^2, 8.0m away closing at -2.8 m/s (TTC = 2.8s < 3.5s)
+  radar_state = SimpleNamespace(
+    leadOne=SimpleNamespace(
+      status=True,
+      radar=True,
+      radarTrackId=1,
+      dRel=10.5,
+      vRel=-3.2,
+      vLead=2.9,
+      aLeadK=-2.6,
+    )
+  )
+  limit = get_lead_predecel_accel_limit(radar_state, v_ego=6.1)
+  assert limit is not None
+  # Bounded to low-speed floor (~ -1.48 m/s^2), preventing harsh -2.0 or -4.0 slam
+  assert -1.6 <= limit <= -1.0
+
+
+

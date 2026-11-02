@@ -1248,7 +1248,7 @@ class CarrotServ:
     atc_desired = 250
     if atc_speed > 0 and x_dist_to_turn > 0:
       decel = self.autoNaviSpeedDecelRate
-      safe_sec = 2.0
+      safe_sec = 3.5
       atc_desired = min(atc_desired, self.calculate_current_speed(x_dist_to_turn - atc_dist, atc_speed, safe_sec, decel))
 
 
@@ -1395,7 +1395,7 @@ class CarrotServ:
                          self.active_carrot > 0 and
                          (self.xSpdType != 22 or self._speed_bump_control_active(self.xSpdDist)))
     if legacy_sdi_active:
-      safe_sec = self.autoNaviSpeedBumpTime if self.xSpdType == 22 else self.autoNaviSpeedCtrlEnd
+      safe_sec = max(3.0, self.autoNaviSpeedBumpTime) if self.xSpdType == 22 else self.autoNaviSpeedCtrlEnd
       decel = self.autoNaviSpeedDecelRate
       sdi_speed = min(sdi_speed, self.calculate_current_speed(self.xSpdDist, self.xSpdLimit, safe_sec, decel))
       self.active_carrot = 5 if self.xSpdType == 22 else 3
@@ -1412,7 +1412,7 @@ class CarrotServ:
     if vehicle_bump_active:
       vehicle_bump_speed = self.calculate_current_speed(CS.speedBumpDistance,
                                                         self.autoNaviSpeedBumpSpeed,
-                                                        self.autoNaviSpeedBumpTime,
+                                                        max(3.0, self.autoNaviSpeedBumpTime),
                                                         self.autoNaviSpeedDecelRate)
       self.active_carrot = 5
 

@@ -379,13 +379,16 @@ class LongitudinalPlanner:
       try:
         cs = sm['carState']
         if not cs.gasPressed and cs.vEgo < 0.6:
-          lead_stop_dist = max(getattr(carrot, 'stop_distance', 5.0), 3.5)
+          lead_stop_dist = max(getattr(carrot, 'stop_distance', 6.0), 4.5)
           lead_one = lead
           if (lead_one.status and lead_one.radar and getattr(lead_one, 'radarTrackId', -1) >= 0
               and getattr(lead_one, 'vLead', 0.0) < 0.3 and getattr(lead_one, 'dRel', 10.0) <= lead_stop_dist + 0.3):
             self.output_should_stop = True
             self.output_v_target_now = 0.0
-            output_a_target = min(output_a_target, -0.5)
+            if cs.vEgo < 0.15:
+              output_a_target = min(output_a_target, -0.5)
+            else:
+              output_a_target = min(output_a_target, -0.25)
       except (KeyError, TypeError, AttributeError):
         pass
 

@@ -81,24 +81,27 @@ def get_lead_predecel_accel_limit(radar_state: Any, v_ego: float) -> float | Non
     and math.isfinite(v_rel)
     and math.isfinite(a_lead)
     and math.isfinite(v_ego)
-    and v_ego > 2.0
-    and d_rel > 5.0
-    and v_rel < -0.5
+    and v_ego > 1.0
+    and d_rel > 3.0
+    and v_rel < -0.3
   ):
     return None
 
   # Case 1: Stationary / stopped lead ahead while traveling at speed
-  # Initiates smooth, progressive early deceleration well in advance
-  is_stationary_lead = v_lead < 1.5 and v_rel < -1.0 and d_rel > 8.0
+  # Initiates smooth, progressive early deceleration well in advance with +1.0m buffer
+  is_stationary_lead = (
+    v_lead < 1.5
+    and v_rel < -0.8
+    and d_rel > 6.0
+    and (v_ego > 5.0 or d_rel < 20.0)
+  )
 
   # Case 2: Lead actively hard braking or urgent closing rate
-  # Require genuine urgency (TTC < 5.0s and heavy lead decel) below 58 km/h (16 m/s)
-  # so routine mild braking or distant follow at 45-50 km/h does not trigger false harsh braking.
   ttc_s = d_rel / max(-v_rel, 0.1)
   if v_ego < 16.0:
     is_hard_braking_lead = (
-      (a_lead < -2.0 and v_rel < -1.5 and ttc_s < 5.0)
-      or (v_rel < -3.5 and ttc_s < 4.0)
+      (a_lead <= -1.5 and v_rel < -1.5 and ttc_s < 6.0)
+      or (v_rel < -3.5 and ttc_s < 4.5)
     )
   else:
     is_hard_braking_lead = (
@@ -106,24 +109,47 @@ def get_lead_predecel_accel_limit(radar_state: Any, v_ego: float) -> float | Non
       or (v_rel < -4.0 and ttc_s < 4.5)
     )
 
-  # Case 3: Closing in traffic at noticeable rate
-  is_closing_follow = (a_lead < -0.4 and v_rel < -2.0 and ttc_s < 7.0) or (v_rel < -4.0 and ttc_s < 6.0)
+  # Case 3: Lead decelerating towards a stop or low-speed stopping approach ahead
+  # Initiates early progressive braking so gap does not collapse into collision risk
+  is_stopping_lead = (
+    not is_hard_braking_lead
+    and v_lead < 7.0
+    and (a_lead < -0.5 or (v_lead < 3.5 and v_rel < -0.4))
+    and v_rel < -0.4
+    and 3.5 < d_rel < 25.0
+  )
 
-  if not (is_stationary_lead or is_hard_braking_lead or is_closing_follow):
+  # Case 4: Closing in traffic at noticeable rate
+  is_closing_follow = (
+    not is_stationary_lead
+    and not is_hard_braking_lead
+    and not is_stopping_lead
+    and v_ego > 5.0
+    and d_rel >= 10.0
+    and ((a_lead < -0.4 and v_rel < -2.0 and ttc_s < 7.0) or (v_rel < -4.0 and ttc_s < 6.0))
+  )
+
+  if not (is_stationary_lead or is_hard_braking_lead or is_stopping_lead or is_closing_follow):
     return None
 
   if is_stationary_lead:
     # Smooth, comfortable early deceleration to bring speed down early for stationary vehicle
-    # Target stopping distance cushion 6.0m
-    stop_target_dist = 6.0
-    a_stopping_req = -(v_ego ** 2) / (2.0 * max(d_rel - stop_target_dist, 5.0))
+    # Target stopping distance cushion 7.0m (+1.0m buffer)
+    stop_target_dist = 7.0
+    a_stopping_req = -(v_ego ** 2) / (2.0 * max(d_rel - stop_target_dist, 3.0))
     # Cap between -1.5 m/s^2 (comfortable progressive decel) and -0.4 m/s^2
     return max(-1.5, min(-0.4, a_stopping_req))
   elif is_hard_braking_lead:
     # Hard braking lead: match lead decel + closing rate, bounded to speed-appropriate floor
-    a_rel_req = a_lead - (v_rel ** 2) / (2.0 * max(d_rel - 5.0, 5.0))
-    min_floor = float(np.interp(v_ego, [4.0, 10.0, 16.0], [-1.2, -1.8, -2.5]))
+    a_rel_req = a_lead - (v_rel ** 2) / (2.0 * max(d_rel - 6.0, 4.0))
+    min_floor = float(np.interp(v_ego, [4.0, 10.0, 16.0], [-1.2, -2.0, -2.5]))
     return max(min_floor, min(-0.5, a_rel_req))
+  elif is_stopping_lead:
+    # Low-speed decelerating lead: smoothly ramp deceleration to stop at +1.0m buffer
+    stop_target_dist = 7.0
+    a_stop_req = a_lead - (max(0.0, v_ego - v_lead) ** 2) / (2.0 * max(d_rel - stop_target_dist, 2.5))
+    min_floor = float(np.interp(v_ego, [2.0, 6.7, 12.0], [-0.85, -0.95, -2.0]))
+    return max(min_floor, min(-0.35, a_stop_req))
   else:
     # Gentle closing follow: smooth negative ceiling between -0.50 and -0.15 m/s^2
     clamped_ttc = min(

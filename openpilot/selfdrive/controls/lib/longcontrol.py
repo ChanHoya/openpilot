@@ -21,6 +21,16 @@ STOPPING_ACCEL_MAX = -50
 
 LongCtrlState = car.CarControl.Actuators.LongControlState
 
+# ── 정차 마무리(소프트랜딩) ─────────────────────────────────────────
+# 계획(aTarget)은 정지 직전 감속을 0 부근까지 풀어 부드럽게 안착하도록 수렴하는데,
+# 종전 stopping 로직은 이를 무시하고 PID의 깊은 명령을 이어받아 stopAccel 방향으로
+# 계속 조이기만 했다(하강 전용 램프). 결과: 정지 직전 감속이 되레 심화되는 '울컥' 정차.
+# → 2단계로 분리: 바퀴가 멈추기 전(v>SETTLE)에는 계획 수준까지 브레이크를 완만히 풀어
+#   소프트랜딩하고, 정지 후에만 홀드 압력(stopAccel)으로 조인다(정지 상태라 체감 없음).
+STOP_SETTLE_SPEED = 0.15       # m/s   이 속도 미만이면 '바퀴 정지'로 보고 홀드 단계 전환
+STOP_SOFT_MIN_DECEL = 0.25     # m/s^2 구르는 동안 유지할 최소 감속(크리프/경사 밀림 방지)
+STOP_SOFT_RELEASE_JERK = 0.7   # m/s^3 소프트랜딩 시 브레이크 풀림(상승) 속도 제한
+
 
 def long_control_state_trans(CP, active, long_control_state, v_ego,
                              should_stop, brake_pressed, cruise_standstill, a_ego, stopping_accel, radarState):
@@ -57,7 +67,7 @@ def long_control_state_trans(CP, active, long_control_state, v_ego,
         and bool(getattr(leadOne, 'status', False))
         and bool(getattr(leadOne, 'radar', False))
         and float(getattr(leadOne, 'vLead', 0.0)) < 0.3
-        and float(getattr(leadOne, 'dRel', 10.0)) < 3.5
+        and float(getattr(leadOne, 'dRel', 10.0)) < 4.5
         and v_ego < 0.5
       )
       if stopping_condition or lead_close_stop:
@@ -173,10 +183,22 @@ class LongControl:
 
       if soft_hold_active:
         output_accel = self.CP.stopAccel
-      # Restore the original one-way ramp. Do not unwind stronger braking.
-      if output_accel > self.stopping_accel:
-        output_accel = min(output_accel, 0.0)
-        output_accel -= self.CP.stoppingDecelRate * DT_CTRL
+      else:
+        stopAccel = self.stopping_accel if self.stopping_accel < 0.0 else self.CP.stopAccel
+        if CS.vEgo > STOP_SETTLE_SPEED:
+          # 소프트랜딩: 계획(a_target_ff)이 감속을 풀라는 만큼(단, 최소 감속 -STOP_SOFT_MIN_DECEL은 유지)
+          # 브레이크를 완만히 풀어 안착. 계획이 더 깊은 감속을 요구하면 그쪽으로 조여 따라간다.
+          soft_target = float(np.clip(a_target_ff, stopAccel, -STOP_SOFT_MIN_DECEL))
+          if output_accel < soft_target:
+            output_accel = min(soft_target, output_accel + STOP_SOFT_RELEASE_JERK * DT_CTRL)
+          else:
+            output_accel = max(soft_target, output_accel - self.CP.stoppingDecelRate * DT_CTRL)
+        elif output_accel > stopAccel:
+          # 정지 완료: 홀드 압력(stopAccel)까지 조임(차량이 이미 멈춰 있어 모션 체감 없음).
+          output_accel = min(output_accel, 0.0)
+          output_accel -= self.CP.stoppingDecelRate * DT_CTRL
+          if output_accel < stopAccel:
+            output_accel = stopAccel
       self.reset()
 
     elif self.long_control_state == LongCtrlState.starting:

@@ -27,6 +27,7 @@ from opendbc.car.toyota.ars510_carrot import Ars510RadarInterface
 from opendbc.car.toyota.tests.test_ars510_carrot import make_record, packets_for
 from opendbc.car.toyota.values import CAR, ToyotaFlags
 from openpilot.common.constants import CV
+from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.selfdrive.carrot.carrot_man_input import get_carrot_man
@@ -72,6 +73,7 @@ def functions():
   namespace = {'np': np, 'CV': CV, 'V_CRUISE_MAX': V_CRUISE_MAX, 'V_CRUISE_UNSET': V_CRUISE_UNSET,
                'LongCtrlState': LongCtrlState, 'ACCEL_MAX': ACCEL_MAX, 'ACCEL_MIN': ACCEL_MIN,
                'A_CRUISE_MIN': source_literal(planner_path, 'A_CRUISE_MIN'),
+               'FirstOrderFilter': FirstOrderFilter,
                'get_future_curvature': get_future_curvature, 'limit_accel_in_turns': limit_accel_in_turns,
                'get_cutin_predecel_accel_limit': get_cutin_predecel_accel_limit,
                'get_lead_predecel_accel_limit': get_lead_predecel_accel_limit,

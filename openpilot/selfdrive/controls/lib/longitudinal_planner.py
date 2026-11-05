@@ -85,6 +85,7 @@ class LongitudinalPlanner:
     self.vCluRatio = 1.0
     self.reset_decel_timer = 0
     self.reset_decel_start_a = 0.0
+    self.cruise_ramp_a = FirstOrderFilter(0.0, 1.5, self.dt)
 
     self.v_cruise_kph = 0.0
 
@@ -165,8 +166,56 @@ class LongitudinalPlanner:
     prev_accel_constraint = not (reset_state or sm['carState'].standstill)
 
     if self.mpc.mode == 'acc':
-      #accel_limits = [A_CRUISE_MIN, get_max_accel(v_ego)]
-      accel_limits = [A_CRUISE_MIN, carrot.get_carrot_accel(v_ego)]
+      radar_state = sm['radarState']
+      lead_one = getattr(radar_state, 'leadOne', None)
+      has_lead = bool(getattr(lead_one, 'status', False))
+      base_max_accel = carrot.get_carrot_accel(v_ego)
+
+      # ── 저속 탄력 구간(0~50km/h) 및 선행차 유무에 따른 목표 가속도 상한 계산 ──
+      # 저속에서 급격한 가속 요청으로 인한 변속기 킥다운 및 RPM 치솟음 방지
+      # 탄력이 붙는 구간(20~50km/h)을 거치며 점진적으로 일반 가속 상한으로 수렴
+      v_ego_kph = v_ego * CV.MS_TO_KPH
+      if has_lead and lead_one is not None:
+        # 선행차 추종: 일반적인 수동 운전 수준의 자연스러운 캐치업 (1.25~1.45 m/s^2)
+        v_rel = float(getattr(lead_one, 'vRel', 0.0))
+        a_lead = float(getattr(lead_one, 'aLeadK', 0.0))
+        lead_departing = bool(v_rel > 0.2 or a_lead > 0.2)
+        low_speed_cap = float(np.interp(v_ego_kph, [0.0, 15.0, 35.0, 50.0], [0.85, 1.25, 1.45, base_max_accel]))
+        if lead_departing:
+          low_speed_cap = max(low_speed_cap, 1.35)
+        target_a = min(base_max_accel, low_speed_cap)
+        tau = 1.2 if lead_departing else 1.4
+        headroom = 0.55 if lead_departing else 0.45
+      else:
+        # 선행차 이탈 / 큰 속도 편차(예: 26 -> 110km/h): RPM 안정과 부드러운 가속 전개
+        low_speed_cap = float(np.interp(v_ego_kph, [0.0, 15.0, 35.0, 50.0], [0.75, 1.05, 1.30, base_max_accel]))
+        target_a = min(base_max_accel, low_speed_cap)
+        tau = 1.6
+        headroom = 0.38
+
+      # ── S-Curve 램프업 (1차 LPF 필터) ──
+      if getattr(self, 'cruise_ramp_a', None) is not None:
+        if reset_state:
+          self.cruise_ramp_a.x = max(0.0, sm['carState'].aEgo)
+        else:
+          if sm['carState'].standstill:
+            start_floor = min(0.65, target_a)
+            self.cruise_ramp_a.x = max(self.cruise_ramp_a.x, start_floor)
+          else:
+            # 정속/감속 중일 때 필터가 상한에 미리 도달해 있지 않도록 현재 가속도 기준으로 헤드룸 제한
+            # (선행차가 빠지거나 가속 요구 시 현재 상태에서 부드럽게 S-커브로 가속이 전개되도록 보장)
+            current_a = max(0.0, getattr(self, 'a_desired', 0.0), sm['carState'].aEgo)
+            if self.cruise_ramp_a.x > current_a + headroom:
+              self.cruise_ramp_a.x = max(0.5, current_a + headroom)
+
+          self.cruise_ramp_a.update_alpha(tau)
+          self.cruise_ramp_a.update(target_a)
+
+        max_a = min(base_max_accel, self.cruise_ramp_a.x)
+      else:
+        max_a = base_max_accel
+
+      accel_limits = [A_CRUISE_MIN, max_a]
       curvature_future = get_future_curvature(sm['modelV2'], sm['controlsState'].desiredCurvature)
       a_lat_max = 3.0
       accel_limits_turns = limit_accel_in_turns(
@@ -175,6 +224,8 @@ class LongitudinalPlanner:
         current_curvature=sm['controlsState'].curvature,
       )
     else:
+      if getattr(self, 'cruise_ramp_a', None) is not None:
+        self.cruise_ramp_a.x = max(0.0, sm['carState'].aEgo)
       accel_limits = [ACCEL_MIN, ACCEL_MAX]
       accel_limits_turns = [ACCEL_MIN, ACCEL_MAX]
 

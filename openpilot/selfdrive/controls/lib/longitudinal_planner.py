@@ -16,7 +16,6 @@ from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_
 from openpilot.selfdrive.controls.lib.cutin_predecel import (
   apply_cutin_predecel_accel_limit,
   get_cutin_predecel_accel_limit,
-  get_lead_predecel_accel_limit,
 )
 from openpilot.selfdrive.controls.lib.longitudinal_preview import (
   apply_preview_target,
@@ -167,10 +166,11 @@ class LongitudinalPlanner:
     return x, v, a, j, throttle_prob
 
   def update(self, sm, carrot):
-    self.coasting_param_time += self.dt
-    if self.coasting_param_time >= 1.0:
-      self.coasting_param_time = 0.0
-      self.coasting_percent = coasting_percent(self.params.get_int('CruiseCoastingPercent'))
+    if hasattr(self, 'coasting_param_time'):
+      self.coasting_param_time += self.dt
+      if self.coasting_param_time >= 1.0:
+        self.coasting_param_time = 0.0
+        self.coasting_percent = coasting_percent(self.params.get_int('CruiseCoastingPercent'))
     self.mpc.mode = 'blended' if sm['selfdriveState'].experimentalMode else 'acc'
 
     if len(sm['carControl'].orientationNED) == 3:
@@ -217,16 +217,33 @@ class LongitudinalPlanner:
       # ── 저속 탄력 구간(0~50km/h) 및 선행차 유무에 따른 목표 가속도 상한 계산 ──
       # 저속에서 급격한 가속 요청으로 인한 변속기 킥다운 및 RPM 치솟음 방지
       # 탄력이 붙는 구간(20~50km/h)을 거치며 점진적으로 일반 가속 상한으로 수렴
-      v_ego_kph = v_ego * CV.MS_TO_KPH
+      v_ego_kph = v_ego / CV.KPH_TO_MS
       if has_lead and lead_one is not None:
         # 선행차 추종: 일반적인 수동 운전 수준의 자연스러운 캐치업 (1.25~1.45 m/s^2)
         v_rel = float(getattr(lead_one, 'vRel', 0.0))
         a_lead = float(getattr(lead_one, 'aLeadK', 0.0))
+        d_rel = float(getattr(lead_one, 'dRel', 0.0))
         lead_departing = bool(v_rel > 0.2 or a_lead > 0.2)
         low_speed_cap = float(np.interp(v_ego_kph, [0.0, 15.0, 35.0, 50.0], [0.85, 1.25, 1.45, base_max_accel]))
         if lead_departing:
           low_speed_cap = max(low_speed_cap, 1.35)
         target_a = min(base_max_accel, low_speed_cap)
+
+        # 선행차와의 목표거리 및 속도에 다다를 때 보간법으로 가속력 조절 (오버슈트 및 직후 급제동 방지)
+        # 단, 정차 출발 시 선행차가 멀어지거나 가속할 때는 기본 추종 가속력(lead_match_a)을 보장하고 추가 캐치업 분량만 보간
+        t_follow = float(getattr(carrot, 't_follow_last', 1.3))
+        stop_dist = float(getattr(carrot, 'stop_distance', 5.0))
+        desired_dist = v_ego * t_follow + stop_dist
+        d_headroom = d_rel - desired_dist
+        gap_scale = float(np.interp(d_headroom, [-1.5, 2.5, 7.0], [0.20, 0.65, 1.0]))
+        rel_scale = float(np.interp(v_rel, [-1.5, 0.0, 1.2], [0.15, 0.60, 1.0])) if not lead_departing else 1.0
+        approach_scale = min(gap_scale, rel_scale)
+        lead_match_a = float(np.clip(a_lead + max(0.0, v_rel) * 0.5, 0.0, target_a))
+        target_a = lead_match_a + (target_a - lead_match_a) * approach_scale
+        if v_rel < -0.2 and d_headroom < 4.0:
+          closing_feather = float(np.interp(v_rel, [-1.8, -0.2], [0.15, 0.85]))
+          target_a *= closing_feather
+
         tau = 1.2 if lead_departing else 1.4
         headroom = 0.55 if lead_departing else 0.45
       else:
@@ -316,21 +333,12 @@ class LongitudinalPlanner:
       if not reset_state and not sm['carState'].gasPressed
       else None
     )
-    get_lead_predecel = globals().get('get_lead_predecel_accel_limit', None)
-    lead_predecel_limit = (
-      get_lead_predecel(sm['radarState'], v_ego)
-      if get_lead_predecel is not None and not reset_state and not sm['carState'].gasPressed and not force_slow_decel
-      else None
-    )
-    active_predecel_limits = [lim for lim in (cutin_predecel_limit, lead_predecel_limit) if lim is not None]
-    predecel_limit = min(active_predecel_limits) if active_predecel_limits else None
-
     # clip limits, cannot init MPC outside of bounds
     accel_limits_turns[0] = min(accel_limits_turns[0], self.a_desired + 0.05)
     accel_limits_turns[1] = apply_cutin_predecel_accel_limit(
       accel_limits_turns[1],
       self.a_desired,
-      predecel_limit,
+      cutin_predecel_limit,
     )
 
     lead_track_frames = self.update_lead_tracks(sm['radarState'])
@@ -468,27 +476,36 @@ class LongitudinalPlanner:
       output_v_target_now = min(output_v_target_mpc, output_v_target_now_e2e)
       self.output_should_stop = output_should_stop_e2e or output_should_stop_mpc
 
-    if predecel_limit is not None:
-      output_a_target = min(output_a_target, accel_limits_turns[1])
-      self.a_desired = min(self.a_desired, output_a_target)
-
-    # Lead vehicle stopping latch: when already at near-standstill behind a stopped lead,
-    # latch stopping firmly to avoid creeping closer than stop_distance.
+    # ── 선행차 약한 감속 시 탄성주행 (가속 없음 / 마일드 감속 데드밴드) ──
+    # 선행차가 가볍게 속도를 줄일 때 즉각 유압 브레이크로 주행감을 해치지 않고,
+    # 자연스러운 엔진 브레이크/탄성주행(-0.15~-0.65m/s^2)으로 대응하다가 감속이 심해지거나 거리가 좁혀지면 MPC 감속에 위임.
+    # 또한 longcontrol.py(KP*(v_target_now - vEgo) + KF*a_target)에서 속도 오차 누적으로 인해
+    # 탄성주행 구간에서 유압 브레이크가 개입하지 않도록 v_desired_filter 및 output_v_target_now를 함께 동기화한다.
     if sm is not None and carrot is not None:
       try:
+        lead_one = lead
         cs = sm['carState']
-        if not cs.gasPressed and cs.vEgo < 0.6:
-          lead_stop_dist = max(getattr(carrot, 'stop_distance', 6.0), 4.5)
-          lead_one = lead
-          if (lead_one.status and lead_one.radar and getattr(lead_one, 'radarTrackId', -1) >= 0
-              and getattr(lead_one, 'vLead', 0.0) < 0.3 and getattr(lead_one, 'dRel', 10.0) <= lead_stop_dist + 0.3):
-            self.output_should_stop = True
-            self.output_v_target_now = 0.0
-            if cs.vEgo < 0.15:
-              output_a_target = min(output_a_target, -0.5)
-            else:
-              output_a_target = min(output_a_target, -0.25)
-      except (KeyError, TypeError, AttributeError):
+        if (self.mpc.mode == 'acc' and not cs.gasPressed and not cs.brakePressed
+            and lead_one.status and lead_one.radar and getattr(lead_one, 'radarTrackId', -1) >= 0):
+          v_rel = float(getattr(lead_one, 'vRel', 0.0))
+          a_lead = float(getattr(lead_one, 'aLeadK', 0.0))
+          d_rel = float(getattr(lead_one, 'dRel', 0.0))
+          v_lead = float(getattr(lead_one, 'vLead', v_ego + v_rel))
+          t_follow = float(getattr(carrot, 't_follow_last', 1.3))
+          stop_dist = float(getattr(carrot, 'stop_distance', 6.0))
+          desired_dist = v_ego * t_follow + stop_dist
+          d_headroom = d_rel - desired_dist
+
+          if v_lead > 2.0 and v_ego > 2.5 and d_headroom >= -2.0 and d_rel >= max(7.0, desired_dist * 0.80):
+            if a_lead > -1.8 and v_rel > -1.8 and output_a_target < 0.0:
+              mild_signal = min(a_lead, v_rel)
+              mild_floor = float(np.interp(mild_signal, [-1.8, -1.0, -0.4, 0.0], [-1.0, -0.65, -0.35, -0.15]))
+              if output_a_target < mild_floor:
+                output_a_target = mild_floor
+                self.a_desired = max(self.a_desired, output_a_target)
+                self.v_desired_filter.x = max(self.v_desired_filter.x, v_ego + output_a_target * self.dt)
+                output_v_target_now = max(output_v_target_now, v_ego + output_a_target * action_t)
+      except (NameError, KeyError, TypeError, AttributeError):
         pass
 
     #for idx in range(2):

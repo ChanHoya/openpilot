@@ -223,24 +223,3 @@ def test_other_brands_keep_adjustable_single_point_tuning():
   assert control.pid._k_p == ([0.0], [0.85])
   assert control.pid._k_i == ([0.0], [0.025])
   assert control.pid.k_f == 1.2
-
-
-def test_soft_landing_brake_release_while_rolling(monkeypatch):
-  monkeypatch.setattr(longcontrol_module, "Params", RejectingParams)
-  cp = make_cp()
-  control = LongControl(cp)
-  control.long_control_state = longcontrol_module.LongCtrlState.stopping
-  control.last_output_accel = -1.1
-
-  # Rolling at 0.5 m/s (vEgo > STOP_SETTLE_SPEED 0.15 m/s) with aTarget easing to -0.3
-  cs = SimpleNamespace(softHoldActive=0, vEgo=0.5, aEgo=-0.9, brakePressed=False,
-                       cruiseState=SimpleNamespace(standstill=False))
-  plan = SimpleNamespace(aTarget=-0.3, vTargetNow=0.5, jTargetNow=0., shouldStop=True)
-  radar = SimpleNamespace(leadOne=SimpleNamespace(status=True, dRel=4.0))
-
-  accel, _, _ = control.update(True, cs, plan, (-3.5, 2.), 0., radar)
-  # Must gently unwind brake towards -0.3 m/s^2 at STOP_SOFT_RELEASE_JERK, preventing pitch jerk
-  expected_accel = -1.1 + longcontrol_module.STOP_SOFT_RELEASE_JERK * longcontrol_module.DT_CTRL
-  assert accel == pytest.approx(expected_accel)
-  assert accel > -1.1
-

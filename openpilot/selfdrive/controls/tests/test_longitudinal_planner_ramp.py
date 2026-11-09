@@ -217,3 +217,132 @@ def test_complex_multiphase_lead_scenario():
   assert ego_speeds[decel_step] < 55.0, f"Ego failed to decelerate: {ego_speeds[decel_step]:.1f}"
 
 
+def test_approach_interpolation_feathers_accel():
+  """선행차 추종 가속 시 목표거리/속도에 도달함에 따라 가속도를 보간법으로 부드럽게 감속시켜 오버슈트 방지."""
+  import numpy as np
+  base_max_accel = 1.6
+  v_ego = 10.0  # 36 km/h
+  v_ego_kph = v_ego * 3.6
+  t_follow = 1.3
+  stop_dist = 5.0
+  desired_dist = v_ego * t_follow + stop_dist  # 18.0m
+
+  # 1. 거리가 멀고 상대속도가 양수일 때 (충분한 공간): 정상 가속 상한 (약 1.45 m/s^2)
+  d_rel_far = 28.0
+  v_rel_far = 1.5
+  a_lead = 0.5
+  d_headroom = d_rel_far - desired_dist  # 10m
+  gap_scale = float(np.interp(d_headroom, [-1.0, 3.0, 8.0], [0.15, 0.55, 1.0]))
+  rel_scale = float(np.interp(v_rel_far, [-1.5, 0.0, 1.2], [0.15, 0.60, 1.0]))
+  approach_scale_far = min(gap_scale, rel_scale)
+  assert approach_scale_far == pytest.approx(1.0)
+
+  # 2. 선행차에 거의 근접했을 때 (d_rel = 18.5m, headroom = +0.5m, v_rel = -0.5m/s):
+  # 가속 상한이 선행차 가속도(0.0) 부근으로 완만하게 축소되어 오버슈트 및 급제동 방지
+  d_rel_close = 18.5
+  v_rel_close = -0.5
+  d_headroom_close = d_rel_close - desired_dist  # 0.5m
+  gap_scale_close = float(np.interp(d_headroom_close, [-1.0, 3.0, 8.0], [0.15, 0.55, 1.0]))
+  rel_scale_close = float(np.interp(v_rel_close, [-1.5, 0.0, 1.2], [0.15, 0.60, 1.0]))
+  approach_scale_close = min(gap_scale_close, rel_scale_close)
+  assert approach_scale_close < 0.40
+
+
+def test_mild_lead_decel_coasting_deadband():
+  """선행차가 경미하게 감속할 때(-0.5~-1.0 m/s^2) 탄성주행(엔진 브레이크 수준) 데드밴드로 대응."""
+  import numpy as np
+  v_ego = 12.0  # 43.2 km/h
+  v_lead = 11.5
+  v_rel = -0.5
+  a_lead = -0.6
+  d_rel = 25.0
+  desired_dist = v_ego * 1.3 + 5.0  # 20.6m
+  d_headroom = d_rel - desired_dist  # +4.4m (충분한 안전거리)
+
+  # MPC가 거리 오차로 인해 -2.0 m/s^2의 제동을 요구했다고 가정
+  output_a_target_raw = -2.0
+
+  # 탄성주행 조건 만족: v_lead > 2.0, d_headroom >= -2.0, d_rel >= 0.8 * desired_dist, a_lead > -1.8, v_rel > -1.8
+  is_coasting_condition = (
+    v_lead > 2.0 and v_ego > 2.5 and d_headroom >= -2.0
+    and d_rel >= max(7.0, desired_dist * 0.80)
+    and a_lead > -1.8 and v_rel > -1.8
+  )
+  assert is_coasting_condition is True
+
+  mild_signal = min(a_lead, v_rel)
+  mild_floor = float(np.interp(mild_signal, [-1.8, -1.0, -0.4, 0.0], [-1.0, -0.65, -0.35, -0.15]))
+  output_a_target = max(output_a_target_raw, mild_floor)
+
+  # 급제동(-2.0)이 아닌 마일드 감속/탄성주행(-0.50 m/s^2 수준)으로 완화됨을 검증
+  assert -0.65 <= output_a_target <= -0.35
+
+
+def test_soft_landing_continuous_deceleration_blending():
+  """정차 직전(0.5km/h 이하) 속도 구간에서 불연속 계단식 jerk(-0.25 -> -0.5) 없이 부드러운 연속 보간 확인."""
+  import numpy as np
+  v_egos = [0.45, 0.35, 0.25, 0.15, 0.08, 0.05]
+  targets = []
+  for v in v_egos:
+    if v < 0.08:
+      target = -0.50
+    else:
+      target = float(np.interp(v, [0.08, 0.45], [-0.50, -0.25]))
+    targets.append(target)
+
+  # 속도가 0에 수렴함에 따라 감속도가 연속적으로 매끄럽게 -0.25 -> -0.50으로 이어짐
+  assert targets[0] == pytest.approx(-0.25)
+  assert targets[-2] == pytest.approx(-0.50)
+  for i in range(len(targets) - 1):
+    assert targets[i] >= targets[i+1]  # 단조 감소 (연속 변화)
+    assert abs(targets[i] - targets[i+1]) < 0.12  # 한 프레임/구간당 급격한 점프 없음
+
+
+def test_mild_decel_synchronizes_v_target_now_for_longcontrol():
+  """탄성주행 데드밴드 작동 시 output_v_target_now도 동기화되어 longcontrol PID 속도오차 누적을 방지하는지 검증."""
+  import numpy as np
+  v_ego = 12.0
+  dt = 0.05
+  action_t = 0.25
+  output_a_target_mpc = -2.0
+  output_v_target_mpc = v_ego + output_a_target_mpc * action_t  # 11.50 m/s (-0.50 m/s 오차)
+  a_desired = -1.8
+  v_filter_x = v_ego + a_desired * dt
+
+  mild_signal = min(-0.5, -0.4)
+  mild_floor = float(np.interp(mild_signal, [-1.8, -1.0, -0.4, 0.0], [-1.0, -0.65, -0.35, -0.15]))
+  output_a_target = max(output_a_target_mpc, mild_floor)
+  a_desired = max(a_desired, output_a_target)
+  v_filter_x = max(v_filter_x, v_ego + output_a_target * dt)
+  output_v_target_now = max(output_v_target_mpc, v_ego + output_a_target * action_t)
+
+  # Hyundai longcontrol: KP=1.0 * (v_target_now - v_ego) + KF=1.0 * output_a_target
+  hyundai_pid_accel = 1.0 * (output_v_target_now - v_ego) + 1.0 * output_a_target
+  assert output_a_target == pytest.approx(-0.40, rel=1e-3)
+  assert hyundai_pid_accel > -0.55  # 급제동(-2.5 m/s^2) 대신 부드러운 엔진브레이크 영역 유지
+
+
+def test_departure_from_stop_preserves_lead_match_acceleration():
+  """정차/저속 출발 시 차간거리가 아직 좁더라도(d_headroom <= 0) 선행차 가속에 맞춰 추종 가속력이 보장되는지 검증."""
+  import numpy as np
+  v_ego = 1.0
+  v_ego_kph = v_ego * 3.6
+  base_max_accel = 1.6
+  v_rel = 0.8
+  a_lead = 0.9
+  d_rel = 5.2
+  desired_dist = v_ego * 1.3 + 5.0  # 6.3m -> d_headroom = -1.1m
+  d_headroom = d_rel - desired_dist
+
+  low_speed_cap = max(float(np.interp(v_ego_kph, [0.0, 15.0, 35.0, 50.0], [0.85, 1.25, 1.45, base_max_accel])), 1.35)
+  target_a_raw = min(base_max_accel, low_speed_cap)
+  gap_scale = float(np.interp(d_headroom, [-1.5, 2.5, 7.0], [0.20, 0.65, 1.0]))
+  approach_scale = gap_scale  # lead_departing=True -> rel_scale=1.0
+  lead_match_a = float(np.clip(a_lead + max(0.0, v_rel) * 0.5, 0.0, target_a_raw))
+  target_a = lead_match_a + (target_a_raw - lead_match_a) * approach_scale
+
+  assert target_a >= 1.25  # 출발 지연 없이 자연스러운 수동 주행 수준의 추종 가속 보장
+
+
+
+

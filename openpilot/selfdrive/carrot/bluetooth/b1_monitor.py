@@ -5,12 +5,19 @@ from contextlib import suppress
 import hashlib
 import hmac
 import secrets
+import os
 from pathlib import Path
 import struct
 import time
 
+import tools
+from openpilot.common.basedir import BASEDIR
 from .bluez import Bluez, DEVICE, properties, radio_enabled
 from .model import CONFIG_PATH, RUNTIME, address, atomic_json, read_json
+
+_root_tools = os.path.join(BASEDIR, 'tools')
+if hasattr(tools, '__path__') and _root_tools not in tools.__path__:
+  tools.__path__.append(_root_tools)
 
 ENROLLMENT = CONFIG_PATH.with_name('b1-monitor.json')
 SERVICE = 'db340a90-804c-4ead-af37-8a0e6af754a1'

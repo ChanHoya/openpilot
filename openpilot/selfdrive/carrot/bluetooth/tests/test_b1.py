@@ -61,8 +61,8 @@ def test_monitor_joins_source_only_after_board_authentication(monkeypatch):
   import time
   from types import SimpleNamespace
 
-  from tools.jetlink import blink_protocol  # noqa: TID251 -- shared subprocess protocol
   from openpilot.selfdrive.carrot.bluetooth.b1_monitor import Monitor, META, CONTROL
+  from tools.jetlink import blink_protocol  # noqa: TID251 -- shared subprocess protocol
 
   async def run():
     monitor = Monitor()

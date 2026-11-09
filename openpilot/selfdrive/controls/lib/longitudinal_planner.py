@@ -223,10 +223,19 @@ class LongitudinalPlanner:
         v_rel = float(getattr(lead_one, 'vRel', 0.0))
         a_lead = float(getattr(lead_one, 'aLeadK', 0.0))
         d_rel = float(getattr(lead_one, 'dRel', 0.0))
+        v_lead = float(getattr(lead_one, 'vLead', v_ego + v_rel))
         lead_departing = bool(v_rel > 0.2 or a_lead > 0.2)
         low_speed_cap = float(np.interp(v_ego_kph, [0.0, 15.0, 35.0, 50.0], [0.85, 1.25, 1.45, base_max_accel]))
         if lead_departing:
-          low_speed_cap = max(low_speed_cap, 1.35)
+          # 선행차 출발 시 거리/속도 안전 게이트 (가다서다 반복 시 급발진/급제동 방지)
+          # 1~2m 가다 서는 상황(False start)에서는 1.15~1.25 m/s^2로 제한하여 안전 거리 유지
+          # 선행차가 확실히 가속하며 빠져나갈 때만 1.75 m/s^2로 점진적 상향
+          depart_gate = float(np.clip(max(np.interp(d_rel, [4.5, 7.5], [0.0, 1.0]),
+                                          np.interp(v_lead * CV.MS_TO_KPH, [6.0, 16.0], [0.0, 1.0])), 0.0, 1.0))
+          depart_cap = float(np.interp(depart_gate, [0.0, 1.0], [1.15, 1.75]))
+          low_speed_cap = max(low_speed_cap, depart_cap)
+        else:
+          depart_gate = 0.0
         target_a = min(base_max_accel, low_speed_cap)
 
         # 선행차와의 목표거리 및 속도에 다다를 때 보간법으로 가속력 조절 (오버슈트 및 직후 급제동 방지)
@@ -237,17 +246,19 @@ class LongitudinalPlanner:
         d_headroom = d_rel - desired_dist
         gap_scale = float(np.interp(d_headroom, [-1.5, 2.5, 7.0], [0.20, 0.65, 1.0]))
         rel_scale = float(np.interp(v_rel, [-1.5, 0.0, 1.2], [0.15, 0.60, 1.0])) if not lead_departing else 1.0
-        approach_scale = min(gap_scale, rel_scale)
+        approach_scale = min(gap_scale, rel_scale) if not lead_departing else max(gap_scale, float(np.interp(d_rel, [4.0, 7.0], [0.45, 1.0])))
         lead_match_a = float(np.clip(a_lead + max(0.0, v_rel) * 0.5, 0.0, target_a))
         target_a = lead_match_a + (target_a - lead_match_a) * approach_scale
         if v_rel < -0.2 and d_headroom < 4.0:
           closing_feather = float(np.interp(v_rel, [-1.8, -0.2], [0.15, 0.85]))
           target_a *= closing_feather
 
-        tau = 1.2 if lead_departing else 1.4
-        headroom = 0.55 if lead_departing else 0.45
+        tau = 1.1 if (lead_departing and depart_gate > 0.3) else 1.4
+        headroom = (0.75 if depart_gate > 0.4 else 0.55) if lead_departing else 0.45
       else:
         # 선행차 이탈 / 큰 속도 편차(예: 26 -> 110km/h): RPM 안정과 부드러운 가속 전개
+        lead_departing = False
+        depart_gate = 0.0
         low_speed_cap = float(np.interp(v_ego_kph, [0.0, 15.0, 35.0, 50.0], [0.75, 1.05, 1.30, base_max_accel]))
         target_a = min(base_max_accel, low_speed_cap)
         tau = 1.6
@@ -259,7 +270,7 @@ class LongitudinalPlanner:
           self.cruise_ramp_a.x = max(0.0, sm['carState'].aEgo)
         else:
           if sm['carState'].standstill:
-            start_floor = min(0.65, target_a)
+            start_floor = min(0.85 if (lead_departing and depart_gate > 0.25) else 0.65, target_a)
             self.cruise_ramp_a.x = max(self.cruise_ramp_a.x, start_floor)
           else:
             # 정속/감속 중일 때 필터가 상한에 미리 도달해 있지 않도록 현재 가속도 기준으로 헤드룸 제한
@@ -476,9 +487,12 @@ class LongitudinalPlanner:
       output_v_target_now = min(output_v_target_mpc, output_v_target_now_e2e)
       self.output_should_stop = output_should_stop_e2e or output_should_stop_mpc
 
-    # ── 선행차 약한 감속 시 탄성주행 (가속 없음 / 마일드 감속 데드밴드) ──
-    # 선행차가 가볍게 속도를 줄일 때 즉각 유압 브레이크로 주행감을 해치지 않고,
-    # 자연스러운 엔진 브레이크/탄성주행(-0.15~-0.65m/s^2)으로 대응하다가 감속이 심해지거나 거리가 좁혀지면 MPC 감속에 위임.
+    # ── 선행차 감속 대응: 고속 조기 완화 감속 및 탄성주행 데드밴드 ──
+    # 1. 고속 조기 완화 감속: 중고속(35~55km/h 이상)에서 선행차 감속(a_lead 또는 v_rel 음수) 감지 시
+    #    MPC가 거리가 좁혀져 급제동을 치기 전에 부드러운 사전 감속(-0.15~-0.50m/s^2)을 조기 전개.
+    #    (35~55km/h 선형 보간 가중치를 적용하여 저속 주행감 보존 및 경계 속도 채터링/꿀렁거림 방지)
+    # 2. 탄성주행 데드밴드: 선행차가 가볍게 속도를 줄일 때 즉각 유압 브레이크로 주행감을 해치지 않고,
+    #    자연스러운 엔진 브레이크/탄성주행(-0.15~-0.65m/s^2)으로 대응하다가 감속이 심해지거나 거리가 좁혀지면 MPC 감속에 위임.
     # 또한 longcontrol.py(KP*(v_target_now - vEgo) + KF*a_target)에서 속도 오차 누적으로 인해
     # 탄성주행 구간에서 유압 브레이크가 개입하지 않도록 v_desired_filter 및 output_v_target_now를 함께 동기화한다.
     if sm is not None and carrot is not None:
@@ -486,7 +500,7 @@ class LongitudinalPlanner:
         lead_one = lead
         cs = sm['carState']
         if (self.mpc.mode == 'acc' and not cs.gasPressed and not cs.brakePressed
-            and lead_one.status and lead_one.radar and getattr(lead_one, 'radarTrackId', -1) >= 0):
+            and lead_one.status):
           v_rel = float(getattr(lead_one, 'vRel', 0.0))
           a_lead = float(getattr(lead_one, 'aLeadK', 0.0))
           d_rel = float(getattr(lead_one, 'dRel', 0.0))
@@ -495,7 +509,21 @@ class LongitudinalPlanner:
           stop_dist = float(getattr(carrot, 'stop_distance', 6.0))
           desired_dist = v_ego * t_follow + stop_dist
           d_headroom = d_rel - desired_dist
+          v_ego_kph = v_ego * CV.MS_TO_KPH
 
+          # [1] 고속 조기 완화 감속: 중고속에서 선행차가 감속 시작 시 사전 마일드 감속 개입
+          #     속도가 35~55 km/h 구간에서 선형 가중치(0.0 -> 1.0)를 적용하여 저속 정차 간격 보존 및 채터링 방지
+          speed_weight = float(np.clip(np.interp(v_ego_kph, [35.0, 55.0], [0.0, 1.0]), 0.0, 1.0))
+          if speed_weight > 0.0 and d_headroom < 12.0 and d_rel > max(6.0, stop_dist) and (v_rel < -0.3 or a_lead < -0.3):
+            decel_signal = min(a_lead, v_rel)
+            early_decel = float(np.interp(decel_signal, [-2.5, -1.2, -0.3], [-0.50, -0.35, -0.15])) * speed_weight
+            if output_a_target > early_decel:
+              output_a_target = early_decel
+              self.a_desired = min(self.a_desired, output_a_target)
+              self.v_desired_filter.x = min(self.v_desired_filter.x, v_ego + output_a_target * self.dt)
+              output_v_target_now = min(output_v_target_now, v_ego + output_a_target * action_t)
+
+          # [2] 탄성주행 (마일드 감속 바닥 지지)
           if v_lead > 2.0 and v_ego > 2.5 and d_headroom >= -2.0 and d_rel >= max(7.0, desired_dist * 0.80):
             if a_lead > -1.8 and v_rel > -1.8 and output_a_target < 0.0:
               mild_signal = min(a_lead, v_rel)

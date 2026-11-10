@@ -1,5 +1,29 @@
 # Repository memory
 
+- 2026-11-11: Owner requests state2 trial after I5PE11c8/2 rollback with real
+  radar lead41 maintained. Camera-SCC final ACCMode1/StopReq1 now promotes
+  receding real-lead state1 to SCC_ObjSta2, alongside existing no-lead state0
+  fallback. Scope chosen for final stop packets; departure restores normal
+  relative-speed mapping. Four regressions fail before, related261 pass after.
+  Eight-log full-builder A/B23987calls changes475 object-state/CRC packets,
+  23512 identical; acceleration/phase/synthetic-marker outputs agree. OEM
+  parity remains partial: I5PE band.04 vs ours.20, target distance, InfoDisplay,
+  entry timing and trajectories differ. Prior nine failure entries had state2.
+  ESC acceptance and physical hold effect remain unverified. Evidence private
+  .analysis/archive/2026-11-11/stop-state-trial and existing stop-object doc.
+
+- 2026-11-10: Use the actual Carrot cruise cancel latch, not cruise enablement
+  or a timeout, to pause automatic physical indicator requests until SET/RES or
+  +/- clears it. Keep the driver's lever and explicit BT signals independent.
+  Ioniq 5 PE 11c5/36 video shows the right-hand split near 56s. Current-state
+  right-lane probability was still low; the first two future forecast rows
+  agreed before the crossing. The optional model-desire lamp observes these
+  only with measured same-side boundary approach and existing ownership gates.
+  A/B replay through the lamp policy with a ready receiver: new right request
+  at 55.800s; the other 15 segments match. A forecast-owned widening fork
+  tracks far-side progress and lane relabeling while same-side intent persists;
+  11c5/36 owns one request until 58.698s. Replay does not prove physical light.
+
 - 2026-11-09: Fix the four full-build Bluetooth import failures previously
   reported as pre-existing. Cluster paths expose openpilot/tools as top-level
   tools, hiding root tools/jetlink even with the repository first on sys.path.

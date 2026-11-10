@@ -225,14 +225,14 @@ class LongitudinalPlanner:
         d_rel = float(getattr(lead_one, 'dRel', 0.0))
         v_lead = float(getattr(lead_one, 'vLead', v_ego + v_rel))
         lead_departing = bool(v_rel > 0.2 or a_lead > 0.2)
-        low_speed_cap = float(np.interp(v_ego_kph, [0.0, 15.0, 35.0, 50.0], [1.05, 1.35, 1.55, base_max_accel]))
+        low_speed_cap = float(np.interp(v_ego_kph, [0.0, 15.0, 35.0, 50.0], [0.85, 1.25, 1.45, base_max_accel]))
         if lead_departing:
           # 선행차 출발 시 거리/속도 안전 게이트 (가다서다 반복 시 급발진/급제동 방지)
-          # 1~2m 가다 서는 상황(False start)에서는 1.30 m/s^2로 제한하여 안전 거리 유지
-          # 선행차가 4~12km/h 및 4~6.5m로 확실히 가속하며 빠져나갈 때 1.90 m/s^2로 점진적 상향
-          depart_gate = float(np.clip(max(np.interp(d_rel, [4.0, 6.5], [0.0, 1.0]),
-                                          np.interp(v_lead * CV.MS_TO_KPH, [4.0, 12.0], [0.0, 1.0])), 0.0, 1.0))
-          depart_cap = float(np.interp(depart_gate, [0.0, 1.0], [1.30, 1.90]))
+          # 1~2m 가다 서는 상황(False start)에서는 1.15~1.25 m/s^2로 제한하여 안전 거리 유지
+          # 선행차가 확실히 가속하며 빠져나갈 때만 1.75 m/s^2로 점진적 상향
+          depart_gate = float(np.clip(max(np.interp(d_rel, [4.5, 7.5], [0.0, 1.0]),
+                                          np.interp(v_lead * CV.MS_TO_KPH, [6.0, 16.0], [0.0, 1.0])), 0.0, 1.0))
+          depart_cap = float(np.interp(depart_gate, [0.0, 1.0], [1.15, 1.75]))
           low_speed_cap = max(low_speed_cap, depart_cap)
         else:
           depart_gate = 0.0
@@ -246,23 +246,23 @@ class LongitudinalPlanner:
         d_headroom = d_rel - desired_dist
         gap_scale = float(np.interp(d_headroom, [-1.5, 2.5, 7.0], [0.20, 0.65, 1.0]))
         rel_scale = float(np.interp(v_rel, [-1.5, 0.0, 1.2], [0.15, 0.60, 1.0])) if not lead_departing else 1.0
-        approach_scale = min(gap_scale, rel_scale) if not lead_departing else max(gap_scale, float(np.interp(d_rel, [4.0, 6.5], [0.60, 1.0])))
+        approach_scale = min(gap_scale, rel_scale) if not lead_departing else max(gap_scale, float(np.interp(d_rel, [4.0, 7.0], [0.45, 1.0])))
         lead_match_a = float(np.clip(a_lead + max(0.0, v_rel) * 0.5, 0.0, target_a))
         target_a = lead_match_a + (target_a - lead_match_a) * approach_scale
         if v_rel < -0.2 and d_headroom < 4.0:
           closing_feather = float(np.interp(v_rel, [-1.8, -0.2], [0.15, 0.85]))
           target_a *= closing_feather
 
-        tau = 0.95 if (lead_departing and depart_gate > 0.2) else 1.3
-        headroom = (0.85 if depart_gate > 0.3 else 0.65) if lead_departing else 0.45
+        tau = 1.1 if (lead_departing and depart_gate > 0.3) else 1.4
+        headroom = (0.75 if depart_gate > 0.4 else 0.55) if lead_departing else 0.45
       else:
-        # 선행차 없음 / 선행차 이탈 시: RPM 치솟음(킥다운) 방지와 답답함 없는 자연스러운 목표 속도 가속
+        # 선행차 이탈 / 큰 속도 편차(예: 26 -> 110km/h): RPM 안정과 부드러운 가속 전개
         lead_departing = False
         depart_gate = 0.0
-        low_speed_cap = float(np.interp(v_ego_kph, [0.0, 15.0, 35.0, 50.0], [0.95, 1.25, 1.55, base_max_accel]))
+        low_speed_cap = float(np.interp(v_ego_kph, [0.0, 15.0, 35.0, 50.0], [0.75, 1.05, 1.30, base_max_accel]))
         target_a = min(base_max_accel, low_speed_cap)
-        tau = 1.15
-        headroom = 0.60
+        tau = 1.6
+        headroom = 0.38
 
       # ── S-Curve 램프업 (1차 LPF 필터) ──
       if getattr(self, 'cruise_ramp_a', None) is not None:
@@ -270,7 +270,7 @@ class LongitudinalPlanner:
           self.cruise_ramp_a.x = max(0.0, sm['carState'].aEgo)
         else:
           if sm['carState'].standstill:
-            start_floor = min(1.05 if (lead_departing and depart_gate > 0.15) else 0.70, target_a)
+            start_floor = min(0.85 if (lead_departing and depart_gate > 0.25) else 0.65, target_a)
             self.cruise_ramp_a.x = max(self.cruise_ramp_a.x, start_floor)
           else:
             # 정속/감속 중일 때 필터가 상한에 미리 도달해 있지 않도록 현재 가속도 기준으로 헤드룸 제한
@@ -415,13 +415,6 @@ class LongitudinalPlanner:
 
     longitudinalActuatorDelay = self.params.get_float("LongActuatorDelay")*0.01
     vEgoStopping = get_stopping_speed(self.params)
-    if self.mpc.mode == 'acc' and sm is not None:
-      lead_one = getattr(sm['radarState'], 'leadOne', None)
-      if lead_one is not None and getattr(lead_one, 'status', False):
-        # 선행차 추종 정차 시: 0.7~1.8km/h 구간에서 조기 shouldStop 전환으로 인한
-        # 급격한 브레이킹 바이트(stopping_accel -0.50m/s^2 강제 인입)를 방지.
-        # 바퀴가 거의 멈춘 상태(0.12m/s 이하)까지 부드러운 MPC 감속 곡선을 유지
-        vEgoStopping = min(vEgoStopping, 0.12)
     action_t =  longitudinalActuatorDelay + DT_MDL
 
     output_a_target_base, output_should_stop_mpc, output_v_target_mpc, _ = get_accel_from_plan(

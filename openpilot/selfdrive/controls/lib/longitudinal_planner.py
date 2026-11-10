@@ -225,14 +225,14 @@ class LongitudinalPlanner:
         d_rel = float(getattr(lead_one, 'dRel', 0.0))
         v_lead = float(getattr(lead_one, 'vLead', v_ego + v_rel))
         lead_departing = bool(v_rel > 0.2 or a_lead > 0.2)
-        low_speed_cap = float(np.interp(v_ego_kph, [0.0, 15.0, 35.0, 50.0], [0.85, 1.25, 1.45, base_max_accel]))
+        low_speed_cap = float(np.interp(v_ego_kph, [0.0, 15.0, 35.0, 50.0], [0.85, 1.35, 1.60, base_max_accel]))
         if lead_departing:
           # 선행차 출발 시 거리/속도 안전 게이트 (가다서다 반복 시 급발진/급제동 방지)
           # 1~2m 가다 서는 상황(False start)에서는 1.15~1.25 m/s^2로 제한하여 안전 거리 유지
-          # 선행차가 확실히 가속하며 빠져나갈 때만 1.75 m/s^2로 점진적 상향
+          # 선행차가 확실히 가속하며 빠져나갈 때만 1.85 m/s^2로 점진적 상향
           depart_gate = float(np.clip(max(np.interp(d_rel, [4.5, 7.5], [0.0, 1.0]),
                                           np.interp(v_lead * CV.MS_TO_KPH, [6.0, 16.0], [0.0, 1.0])), 0.0, 1.0))
-          depart_cap = float(np.interp(depart_gate, [0.0, 1.0], [1.15, 1.75]))
+          depart_cap = float(np.interp(depart_gate, [0.0, 1.0], [1.15, 1.85]))
           low_speed_cap = max(low_speed_cap, depart_cap)
         else:
           depart_gate = 0.0
@@ -259,10 +259,10 @@ class LongitudinalPlanner:
         # 선행차 이탈 / 큰 속도 편차(예: 26 -> 110km/h): RPM 안정과 부드러운 가속 전개
         lead_departing = False
         depart_gate = 0.0
-        low_speed_cap = float(np.interp(v_ego_kph, [0.0, 15.0, 35.0, 50.0], [0.75, 1.05, 1.30, base_max_accel]))
+        low_speed_cap = float(np.interp(v_ego_kph, [0.0, 15.0, 35.0, 50.0], [0.80, 1.20, 1.45, base_max_accel]))
         target_a = min(base_max_accel, low_speed_cap)
-        tau = 1.6
-        headroom = 0.38
+        tau = 1.5
+        headroom = 0.42
 
       # ── S-Curve 램프업 (1차 LPF 필터) ──
       if getattr(self, 'cruise_ramp_a', None) is not None:

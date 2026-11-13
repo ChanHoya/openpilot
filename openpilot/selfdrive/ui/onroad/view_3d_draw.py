@@ -20,6 +20,22 @@ def _mix(c0, c1, t: float, alpha: float = 1.0) -> rl.Color:
   return _c(*(c0[i] + (c1[i] - c0[i]) * t for i in range(3)), a=c0[3] + (c1[3] - c0[3]) * t, alpha=alpha)
 
 
+def tire_grad_color(d: float, alpha: float = 1.0) -> rl.Color:
+  """danger 0(center) -> 1(touching lane): green -> yellow -> red multi-stop."""
+  d = max(0.0, min(1.5, float(d)))
+  if d <= 0.10:
+    r, g = 0.0, 200.0
+  elif d <= 0.60:
+    f = (d - 0.10) / 0.50
+    r, g = f * 255.0, 200.0
+  elif d <= 1.00:
+    f = (d - 0.60) / 0.40
+    r, g = 255.0, 200.0 - f * 200.0
+  else:
+    r, g = 255.0, 0.0
+  return _c(int(r), int(g), 0, 220, alpha=alpha)
+
+
 # Palettes keep vehicles readable on the dark night tarmac and the light day tarmac.
 PALETTE = {
   True: {   # night

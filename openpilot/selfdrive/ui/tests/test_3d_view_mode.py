@@ -312,7 +312,10 @@ def test_scene_draws_close_stop_with_ego_car(monkeypatch, sizes_name, rect, is_n
   assert styles[-1] == 'ego' and 'lead' in styles and 'adj' in styles
   lead = [c for c in cars if c[0] == 'lead'][-1]
   assert lead[1] + lead[2] / 2 < rect.height  # close lead stays on screen
-  assert not wheels
+  # Steering wheel transitions naturally into the vehicle cockpit interior
+  assert len(wheels) == 1
+  _wheel_x, wheel_y, wheel_r = wheels[0][0], wheels[0][1], wheels[0][2]
+  assert wheel_y < rect.height and wheel_r < rect.height * scene.sizes.wheel_radius_frac
 
 
 def test_scene_cruise_shows_wheel_and_no_ego_car(monkeypatch):

@@ -4,7 +4,7 @@ import time
 import numpy as np
 
 from openpilot.selfdrive.ui.onroad.path_geometry import project_path, sample_path
-from openpilot.selfdrive.ui.onroad.fsd_scene import FsdScene, C3_SIZES
+from openpilot.selfdrive.ui.onroad.view_3d_scene import View3dScene, C3_SIZES
 from openpilot.selfdrive.ui.render_diagnostics import RenderDiagnostics
 import pyray as rl
 from openpilot.cereal import messaging, car, log
@@ -98,7 +98,8 @@ class ModelRenderer(Widget):
     self._lane_lines = [ModelPoints() for _ in range(4)]
     self._road_edges = [ModelPoints() for _ in range(2)]
     self._acceleration_x = np.empty((0,), dtype=np.float32)
-    self._fsd_mode: bool = False
+    self._view_3d_mode: bool = False
+    self._view_3d_is_night: bool = True
 
     # Transform matrix (3x3 for car space to screen space)
     self._car_space_transform = np.zeros((3, 3), dtype=np.float32)
@@ -125,9 +126,27 @@ class ModelRenderer(Widget):
     self._car_space_transform = transform.astype(np.float32)
     self._transform_dirty = True
 
-  def set_fsd_mode(self, enabled: bool, is_night: bool = True) -> None:
-    self._fsd_mode = enabled
-    self._fsd_is_night = is_night
+  def set_view_3d_mode(self, enabled: bool, is_night: bool = True) -> None:
+    self._view_3d_mode = enabled
+    self._view_3d_is_night = is_night
+
+  set_fsd_mode = set_view_3d_mode
+
+  @property
+  def _fsd_mode(self) -> bool:
+    return self._view_3d_mode
+
+  @_fsd_mode.setter
+  def _fsd_mode(self, val: bool) -> None:
+    self._view_3d_mode = val
+
+  @property
+  def _fsd_is_night(self) -> bool:
+    return self._view_3d_is_night
+
+  @_fsd_is_night.setter
+  def _fsd_is_night(self, val: bool) -> None:
+    self._view_3d_is_night = val
 
   def _render(self, rect: rl.Rectangle):
     state = self._overlay_state
@@ -183,8 +202,8 @@ class ModelRenderer(Widget):
   def _draw_carrot_overlays(self, sm) -> None:
     timing = self._render_diagnostics
     timing.start()
-    if getattr(self, '_fsd_mode', False):
-      timing.call('fsd', self._draw_fsd_visualization, sm)
+    if getattr(self, '_view_3d_mode', False) or getattr(self, '_fsd_mode', False):
+      timing.call('view_3d', self._draw_3d_view_visualization, sm)
     else:
       timing.call('path', self._draw_path_carrot, sm)
       timing.call('lanes', self._draw_lane_lines_carrot, sm)
@@ -1636,10 +1655,13 @@ class ModelRenderer(Widget):
         white = rl.Color(255, 255, 255, 255)
         draw_text_ui_style(dir_label, tx, ty - 56.0, 72, white, font=self._font_display, align="center", y_offset=0.0)
         draw_text_ui_style(dist_str, tx, ty + 18.0, 52, white, font=self._font_display, align="center", y_offset=0.0)
-  def _draw_fsd_visualization(self, sm):
+  def _draw_3d_view_visualization(self, sm):
     """3D view: virtual chase camera that widens near close leads and sharp curves."""
     if not sm.valid['modelV2']:
       return
-    if not hasattr(self, '_fsd_scene'):
-      self._fsd_scene = FsdScene(C3_SIZES)
-    self._fsd_scene.draw(self, sm, self._rect, getattr(self, '_fsd_is_night', True))
+    if not hasattr(self, '_view_3d_scene'):
+      self._view_3d_scene = View3dScene(C3_SIZES)
+    is_night = getattr(self, '_view_3d_is_night', getattr(self, '_fsd_is_night', True))
+    self._view_3d_scene.draw(self, sm, self._rect, is_night)
+
+  _draw_fsd_visualization = _draw_3d_view_visualization

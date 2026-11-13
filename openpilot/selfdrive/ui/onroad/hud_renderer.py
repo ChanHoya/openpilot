@@ -148,7 +148,7 @@ class HudRenderer(Widget):
     super().__init__()
     self._overlay = OverlayLayer(1)
     self._overlay_state = None
-    self._fsd_mode = False
+    self._view_3d_mode = False
     self._is_night = True
     self._display_clock = DisplayClock()
     self._blink_phase = 0.0
@@ -216,9 +216,19 @@ class HudRenderer(Widget):
     self._date_time_text = ""
     self._date_text = ""
 
-  def set_fsd_theme(self, fsd_mode: bool, is_night: bool = True) -> None:
-    self._fsd_mode = fsd_mode
+  def set_view_3d_theme(self, view_3d_mode: bool, is_night: bool = True) -> None:
+    self._view_3d_mode = view_3d_mode
     self._is_night = is_night
+
+  set_fsd_theme = set_view_3d_theme
+
+  @property
+  def _fsd_mode(self) -> bool:
+    return self._view_3d_mode
+
+  @_fsd_mode.setter
+  def _fsd_mode(self, val: bool) -> None:
+    self._view_3d_mode = val
 
   def _refresh_hud_params(self, now: float) -> None:
     if now < self._hud_params_next_refresh_time:
@@ -320,7 +330,7 @@ class HudRenderer(Widget):
   def _paint(self, rect: rl.Rectangle) -> None:
 
     # Draw the header background
-    if getattr(self, '_fsd_mode', False) and not getattr(self, '_is_night', True):
+    if (getattr(self, '_view_3d_mode', False) or getattr(self, '_fsd_mode', False)) and not getattr(self, '_is_night', True):
       header_start = rl.Color(255, 255, 255, 120)
       header_end = rl.Color(255, 255, 255, 0)
     else:
@@ -709,7 +719,7 @@ class HudRenderer(Widget):
     cur_speed_int = 123 if self._debug_speed_panel else int(round(self.speed))
     cur_text = str(cur_speed_int)
 
-    is_light = getattr(self, '_fsd_mode', False) and not getattr(self, '_is_night', True)
+    is_light = (getattr(self, '_view_3d_mode', False) or getattr(self, '_fsd_mode', False)) and not getattr(self, '_is_night', True)
     speed_color = rl.Color(20, 25, 35, 255) if is_light else rl.WHITE
     border_color = rl.Color(255, 255, 255, 200) if is_light else rl.BLACK
     shadow_color = rl.Color(255, 255, 255, 120) if is_light else rl.BLACK
@@ -1085,7 +1095,7 @@ class HudRenderer(Widget):
     x = int(rect.x + 170)
     y = int(rect.y + 120)
 
-    is_light = getattr(self, '_fsd_mode', False) and not getattr(self, '_is_night', True)
+    is_light = (getattr(self, '_view_3d_mode', False) or getattr(self, '_fsd_mode', False)) and not getattr(self, '_is_night', True)
     text_color = rl.Color(28, 34, 46, 255) if is_light else rl.WHITE
     border_color = rl.Color(255, 255, 255, 180) if is_light else rl.BLACK
     shadow_color = rl.Color(255, 255, 255, 100) if is_light else rl.BLACK
@@ -1159,7 +1169,7 @@ class HudRenderer(Widget):
     self, bx: float, by: float, dw: float,
     fl: float, fr: float, rl_v: float, rr: float,
   ) -> None:
-    is_light = getattr(self, '_fsd_mode', False) and not getattr(self, '_is_night', True)
+    is_light = (getattr(self, '_view_3d_mode', False) or getattr(self, '_fsd_mode', False)) and not getattr(self, '_is_night', True)
     border_color = rl.Color(255, 255, 255, 180) if is_light else rl.BLACK
     shadow_color = rl.Color(255, 255, 255, 100) if is_light else rl.BLACK
 

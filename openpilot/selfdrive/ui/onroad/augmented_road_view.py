@@ -13,7 +13,7 @@ from openpilot.selfdrive.ui.onroad.model_renderer import ModelRenderer
 from openpilot.selfdrive.ui.render_diagnostics import RenderDiagnostics
 from openpilot.selfdrive.ui.overlay_state import OverlayState
 from openpilot.selfdrive.ui.onroad.cameraview import CameraView
-from openpilot.selfdrive.ui.onroad.fsd_button import FsdButton
+from openpilot.selfdrive.ui.onroad.view_3d_button import View3dButton, FsdButton
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.text_draw import draw_text_ui_style
 from openpilot.common.transformations.camera import DEVICE_CAMERAS, DeviceCameraConfig, view_frame_from_device_frame
@@ -66,7 +66,8 @@ class AugmentedRoadView(CameraView):
     self._hud_renderer._overlay_state = self._overlay_state
     self.alert_renderer = AlertRenderer()
     self.driver_state_renderer = DriverPreview()
-    self._fsd_button = FsdButton()
+    self._view_3d_button = View3dButton()
+    self._fsd_button = self._view_3d_button
 
     # debug
     self._pm = messaging.PubMaster(['uiDebug'])
@@ -127,25 +128,26 @@ class AugmentedRoadView(CameraView):
     )
 
     _t = time.monotonic()
-    is_night = self.is_fsd_night_mode()
+    is_night = self.is_view_3d_night_mode()
+    is_view_3d = self._view_3d_button.view_3d_mode
     if self._suppress_camera_for_cluster:
       rl.draw_rectangle_rec(self._content_rect, rl.BLACK)
     else:
       # Render the base camera view
       timing.call('camera', super()._render, rect)
-      if self._fsd_button.fsd_mode:
-        self._render_fsd_background(self._content_rect, is_night)
+      if is_view_3d:
+        self._render_3d_view_background(self._content_rect, is_night)
     cam_ms = (time.monotonic() - _t) * 1000.0
 
     self._overlay_state.update(ui_state, self.client, self.stream_type, self._suppress_camera_for_cluster)
 
     if not self._suppress_camera_for_cluster:
       # Draw the model overlay only with the camera view
-      self.model_renderer.set_fsd_mode(self._fsd_button.fsd_mode, is_night)
+      self.model_renderer.set_view_3d_mode(is_view_3d, is_night)
       _t = time.monotonic()
       timing.call('model', self.model_renderer.render, self._content_rect)
       model_ms = (time.monotonic() - _t) * 1000.0
-    self._hud_renderer.set_fsd_theme(self._fsd_button.fsd_mode, is_night)
+    self._hud_renderer.set_view_3d_theme(is_view_3d, is_night)
     _t = time.monotonic()
     timing.call('hud', self._hud_renderer.render, self._content_rect)  # includes plot when enabled
     hud_ms = (time.monotonic() - _t) * 1000.0
@@ -159,11 +161,11 @@ class AugmentedRoadView(CameraView):
 
     # Custom UI extension point - add custom overlays here
     # Use self._content_rect for positioning within camera bounds
-    fsd_w = 210
-    fsd_h = 78
-    fsd_x = self._content_rect.x + self._content_rect.width - fsd_w - 10
-    fsd_y = self._content_rect.y + 245
-    self._fsd_button.render(rl.Rectangle(fsd_x, fsd_y, fsd_w, fsd_h))
+    btn_w = 210
+    btn_h = 78
+    btn_x = self._content_rect.x + self._content_rect.width - btn_w - 10
+    btn_y = self._content_rect.y + 245
+    self._view_3d_button.render(rl.Rectangle(btn_x, btn_y, btn_w, btn_h))
 
     # End clipping region
     rl.end_scissor_mode()
@@ -189,10 +191,11 @@ class AugmentedRoadView(CameraView):
     timing.finish()
 
   def _handle_mouse_press(self, mouse_pos):
-    if self._fsd_button.is_pressed or rl.check_collision_point_rec(mouse_pos, self._fsd_button.rect):
+    btn = self._view_3d_button
+    if btn.is_pressed or rl.check_collision_point_rec(mouse_pos, btn.rect):
       return
     for ev in gui_app.mouse_events:
-      if ev.left_pressed and rl.check_collision_point_rec(ev.pos, self._fsd_button.rect):
+      if ev.left_pressed and rl.check_collision_point_rec(ev.pos, btn.rect):
         return
     if not self._hud_renderer.user_interacting() and self._click_callback is not None:
       self._click_callback()
@@ -205,7 +208,8 @@ class AugmentedRoadView(CameraView):
     super().close()
 
   def _handle_mouse_release(self, mouse_pos):
-    if self._fsd_button.is_pressed or rl.check_collision_point_rec(mouse_pos, self._fsd_button.rect):
+    btn = self._view_3d_button
+    if btn.is_pressed or rl.check_collision_point_rec(mouse_pos, btn.rect):
       return
 
   def _draw_border(self, rect: rl.Rectangle):
@@ -314,9 +318,11 @@ class AugmentedRoadView(CameraView):
 
     return self._cached_matrix
 
-  def is_fsd_night_mode(self) -> bool:
+  def is_view_3d_night_mode(self) -> bool:
     try:
-      theme_mode = self._params.get_int("FsdThemeMode")
+      theme_mode = self._params.get_int("View3dThemeMode")
+      if theme_mode == 0:
+        theme_mode = self._params.get_int("FsdThemeMode")
       if theme_mode == 1:
         return True
       elif theme_mode == 2:
@@ -325,10 +331,12 @@ class AugmentedRoadView(CameraView):
       pass
     return is_night_time()
 
+  is_fsd_night_mode = is_view_3d_night_mode
+
   def _get_border_color(self, status: UIStatus) -> rl.Color:
     return BORDER_COLORS.get(status, BORDER_COLORS[UIStatus.DISENGAGED])
 
-  def _render_fsd_background(self, rect: rl.Rectangle, is_night: bool = True) -> None:
+  def _render_3d_view_background(self, rect: rl.Rectangle, is_night: bool = True) -> None:
     horizon_h = int(rect.height * 0.40)
     road_y = int(rect.y + horizon_h)
     road_h = int(rect.height - horizon_h)
@@ -365,6 +373,8 @@ class AugmentedRoadView(CameraView):
         1.5,
         rl.Color(160, 175, 198, 200),
       )
+
+  _render_fsd_background = _render_3d_view_background
 
 
   def _draw_border_carrot(self, rect: rl.Rectangle):

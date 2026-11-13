@@ -113,6 +113,7 @@ class UIState:
     # Brightness and UI options
     self.show_brightness_ratio: float = 1.0
     self.show_model_view: int = 0
+    self.view_3d_mode: bool = False
     self.fsd_view_mode: bool = False
     self.share_data: bool = False
     self.show_camera_with_cluster: bool = False
@@ -231,9 +232,10 @@ class UIState:
     self.show_brightness_ratio: float = self.params.get_int("ShowCustomBrightness") / 100.0
     self.show_model_view = self.params.get_int("ShowModelView")
     try:
-      self.fsd_view_mode = self.params.get_bool("FsdViewMode")
+      self.view_3d_mode = self.params.get_bool("View3dMode") or self.params.get_bool("FsdViewMode")
     except Exception:
-      self.fsd_view_mode = False
+      self.view_3d_mode = False
+    self.fsd_view_mode = self.view_3d_mode
     self.share_data = self.params.get_bool("ShareData")
     self.show_camera_with_cluster = self.params.get_int("ShowCameraWithCluster") == 1
     self.usbgpu_present = self.params.get_bool("UsbGpuPresent")

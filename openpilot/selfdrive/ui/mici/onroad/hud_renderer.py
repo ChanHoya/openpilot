@@ -192,12 +192,22 @@ class HudRenderer(Widget):
 
     self._can_draw_top_icons = True
     self._show_wheel_critical = False
-    self._fsd_mode = False
+    self._view_3d_mode = False
     self._is_night = True
 
-  def set_fsd_theme(self, fsd_mode: bool, is_night: bool = True) -> None:
-    self._fsd_mode = fsd_mode
+  def set_view_3d_theme(self, view_3d_mode: bool, is_night: bool = True) -> None:
+    self._view_3d_mode = view_3d_mode
     self._is_night = is_night
+
+  set_fsd_theme = set_view_3d_theme
+
+  @property
+  def _fsd_mode(self) -> bool:
+    return self._view_3d_mode
+
+  @_fsd_mode.setter
+  def _fsd_mode(self, val: bool) -> None:
+    self._view_3d_mode = val
 
     self._font_bold: rl.Font = gui_app.font(FontWeight.BOLD)
     self._font_medium: rl.Font = gui_app.font(FontWeight.MEDIUM)
@@ -567,7 +577,7 @@ class HudRenderer(Widget):
         time_y = base_y
         date_y = time_y + time_size.y + line_gap
 
-        is_light = getattr(self, '_fsd_mode', False) and not getattr(self, '_is_night', True)
+        is_light = (getattr(self, '_view_3d_mode', False) or getattr(self, '_fsd_mode', False)) and not getattr(self, '_is_night', True)
         time_col = rl.Color(35, 42, 54, 245) if is_light else rl.Color(255, 255, 255, 235)
         date_col = rl.Color(50, 60, 75, 230) if is_light else rl.Color(255, 255, 255, 220)
         border_col = rl.Color(255, 255, 255, 180) if is_light else rl.BLACK
@@ -605,7 +615,7 @@ class HudRenderer(Widget):
         time_size = measure_text_cached(self._font_display, time_text, text_font)
         time_y = pos_y - time_size.y / 2
 
-        is_light = getattr(self, '_fsd_mode', False) and not getattr(self, '_is_night', True)
+        is_light = (getattr(self, '_view_3d_mode', False) or getattr(self, '_fsd_mode', False)) and not getattr(self, '_is_night', True)
         time_col = rl.Color(35, 42, 54, 245) if is_light else rl.Color(255, 255, 255, 235)
         border_col = rl.Color(255, 255, 255, 180) if is_light else rl.BLACK
         shadow_col = rl.Color(255, 255, 255, 100) if is_light else rl.BLACK

@@ -192,6 +192,12 @@ class HudRenderer(Widget):
 
     self._can_draw_top_icons = True
     self._show_wheel_critical = False
+    self._fsd_mode = False
+    self._is_night = True
+
+  def set_fsd_theme(self, fsd_mode: bool, is_night: bool = True) -> None:
+    self._fsd_mode = fsd_mode
+    self._is_night = is_night
 
     self._font_bold: rl.Font = gui_app.font(FontWeight.BOLD)
     self._font_medium: rl.Font = gui_app.font(FontWeight.MEDIUM)
@@ -561,22 +567,32 @@ class HudRenderer(Widget):
         time_y = base_y
         date_y = time_y + time_size.y + line_gap
 
+        is_light = getattr(self, '_fsd_mode', False) and not getattr(self, '_is_night', True)
+        time_col = rl.Color(35, 42, 54, 245) if is_light else rl.Color(255, 255, 255, 235)
+        date_col = rl.Color(50, 60, 75, 230) if is_light else rl.Color(255, 255, 255, 220)
+        border_col = rl.Color(255, 255, 255, 180) if is_light else rl.BLACK
+        shadow_col = rl.Color(255, 255, 255, 100) if is_light else rl.BLACK
+
         draw_text_ui_style(
           time_text, draw_time_x, time_y, time_font,
-          rl.Color(255, 255, 255, 235),
+          time_col,
           font=self._font_display,
           border_width=1.0,
           shadow_offset=3.0,
+          border_color=border_col,
+          shadow_color=shadow_col,
           align="left_top",
           y_offset=0.0,
         )
 
         draw_text_ui_style(
           date_text, date_x, date_y, date_font,
-          rl.Color(255, 255, 255, 220),
+          date_col,
           font=self._font_display,
           border_width=1.0,
           shadow_offset=3.0,
+          border_color=border_col,
+          shadow_color=shadow_col,
           align="left_top",
           y_offset=0.0,
         )
@@ -589,12 +605,19 @@ class HudRenderer(Widget):
         time_size = measure_text_cached(self._font_display, time_text, text_font)
         time_y = pos_y - time_size.y / 2
 
+        is_light = getattr(self, '_fsd_mode', False) and not getattr(self, '_is_night', True)
+        time_col = rl.Color(35, 42, 54, 245) if is_light else rl.Color(255, 255, 255, 235)
+        border_col = rl.Color(255, 255, 255, 180) if is_light else rl.BLACK
+        shadow_col = rl.Color(255, 255, 255, 100) if is_light else rl.BLACK
+
         draw_text_ui_style(
           time_text, time_x, time_y, text_font,
-          rl.Color(255, 255, 255, 235),
+          time_col,
           font=self._font_display,
           border_width=1.0,
           shadow_offset=3.0,
+          border_color=border_col,
+          shadow_color=shadow_col,
           align="left_top",
           y_offset=0.0,
         )

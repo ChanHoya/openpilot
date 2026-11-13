@@ -445,4 +445,6 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"OnnxBsdThreshold", {PERSISTENT, INT, "94"}},
     {"OnnxBsdSmoothingMs", {PERSISTENT, INT, "200"}},
     {"OnnxBsdIntervalMs", {PERSISTENT, INT, "250"}},
+    {"FsdViewMode", {PERSISTENT, BOOL, "0"}},
+    {"FsdThemeMode", {PERSISTENT, INT, "0"}},
 };

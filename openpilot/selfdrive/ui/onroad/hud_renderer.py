@@ -148,6 +148,8 @@ class HudRenderer(Widget):
     super().__init__()
     self._overlay = OverlayLayer(1)
     self._overlay_state = None
+    self._fsd_mode = False
+    self._is_night = True
     self._display_clock = DisplayClock()
     self._blink_phase = 0.0
     self._cruise_speed_animation_started = 0.0
@@ -213,6 +215,10 @@ class HudRenderer(Widget):
     self._date_time_minute_key: tuple[int, int, int, int, int] | None = None
     self._date_time_text = ""
     self._date_text = ""
+
+  def set_fsd_theme(self, fsd_mode: bool, is_night: bool = True) -> None:
+    self._fsd_mode = fsd_mode
+    self._is_night = is_night
 
   def _refresh_hud_params(self, now: float) -> None:
     if now < self._hud_params_next_refresh_time:
@@ -314,13 +320,20 @@ class HudRenderer(Widget):
   def _paint(self, rect: rl.Rectangle) -> None:
 
     # Draw the header background
+    if getattr(self, '_fsd_mode', False) and not getattr(self, '_is_night', True):
+      header_start = rl.Color(255, 255, 255, 120)
+      header_end = rl.Color(255, 255, 255, 0)
+    else:
+      header_start = COLORS.HEADER_GRADIENT_START
+      header_end = COLORS.HEADER_GRADIENT_END
+
     rl.draw_rectangle_gradient_v(
       int(rect.x),
       int(rect.y),
       int(rect.width),
       UI_CONFIG.header_height,
-      COLORS.HEADER_GRADIENT_START,
-      COLORS.HEADER_GRADIENT_END,
+      header_start,
+      header_end,
     )
 
     if self.is_cruise_available:
@@ -696,11 +709,18 @@ class HudRenderer(Widget):
     cur_speed_int = 123 if self._debug_speed_panel else int(round(self.speed))
     cur_text = str(cur_speed_int)
 
+    is_light = getattr(self, '_fsd_mode', False) and not getattr(self, '_is_night', True)
+    speed_color = rl.Color(20, 25, 35, 255) if is_light else rl.WHITE
+    border_color = rl.Color(255, 255, 255, 200) if is_light else rl.BLACK
+    shadow_color = rl.Color(255, 255, 255, 120) if is_light else rl.BLACK
+
     draw_text_ui_style(
-      cur_text, bx, by + 50, 120, rl.WHITE,
+      cur_text, bx, by + 50, 120, speed_color,
       font=self._font_display,
       border_width=3.0,
       shadow_offset=8.0,
+      border_color=border_color,
+      shadow_color=shadow_color,
       align="center_bottom",
     )
 
@@ -1065,21 +1085,30 @@ class HudRenderer(Widget):
     x = int(rect.x + 170)
     y = int(rect.y + 120)
 
+    is_light = getattr(self, '_fsd_mode', False) and not getattr(self, '_is_night', True)
+    text_color = rl.Color(28, 34, 46, 255) if is_light else rl.WHITE
+    border_color = rl.Color(255, 255, 255, 180) if is_light else rl.BLACK
+    shadow_color = rl.Color(255, 255, 255, 100) if is_light else rl.BLACK
+
     if show_datetime in (1, 2):
       draw_text_ui_style(
-        self._date_time_text, x, y, 100, rl.WHITE,
+        self._date_time_text, x, y, 100, text_color,
         font=self._font_display,
         border_width=3.0,
         shadow_offset=8.0,
+        border_color=border_color,
+        shadow_color=shadow_color,
         align="center_bottom",
       )
 
     if show_datetime in (1, 3):
       draw_text_ui_style(
-        self._date_text, x, y + 70, 60, rl.WHITE,
+        self._date_text, x, y + 70, 60, text_color,
         font=self._font_display,
         border_width=3.0,
         shadow_offset=8.0,
+        border_color=border_color,
+        shadow_color=shadow_color,
         align="center_bottom",
       )
 
@@ -1130,21 +1159,35 @@ class HudRenderer(Widget):
     self, bx: float, by: float, dw: float,
     fl: float, fr: float, rl_v: float, rr: float,
   ) -> None:
+    is_light = getattr(self, '_fsd_mode', False) and not getattr(self, '_is_night', True)
+    border_color = rl.Color(255, 255, 255, 180) if is_light else rl.BLACK
+    shadow_color = rl.Color(255, 255, 255, 100) if is_light else rl.BLACK
+
+    def _tpms_col(val):
+      c = self._get_tpms_color(val)
+      if is_light and c == COLORS.WHITE_220:
+        return rl.Color(32, 38, 50, 240)
+      return c
+
     draw_text_ui_style(
-      self._get_tpms_text(fl), bx - dw, by - 55, 40, self._get_tpms_color(fl),
-      font=self._font_display, border_width=1.0, shadow_offset=4.0, align='center_bottom',
+      self._get_tpms_text(fl), bx - dw, by - 55, 40, _tpms_col(fl),
+      font=self._font_display, border_width=1.0, shadow_offset=4.0,
+      border_color=border_color, shadow_color=shadow_color, align='center_bottom',
     )
     draw_text_ui_style(
-      self._get_tpms_text(fr), bx + dw, by - 55, 40, self._get_tpms_color(fr),
-      font=self._font_display, border_width=1.0, shadow_offset=4.0, align='center_bottom',
+      self._get_tpms_text(fr), bx + dw, by - 55, 40, _tpms_col(fr),
+      font=self._font_display, border_width=1.0, shadow_offset=4.0,
+      border_color=border_color, shadow_color=shadow_color, align='center_bottom',
     )
     draw_text_ui_style(
-      self._get_tpms_text(rl_v), bx - dw, by + 70, 40, self._get_tpms_color(rl_v),
-      font=self._font_display, border_width=1.0, shadow_offset=4.0, align='center_bottom',
+      self._get_tpms_text(rl_v), bx - dw, by + 70, 40, _tpms_col(rl_v),
+      font=self._font_display, border_width=1.0, shadow_offset=4.0,
+      border_color=border_color, shadow_color=shadow_color, align='center_bottom',
     )
     draw_text_ui_style(
-      self._get_tpms_text(rr), bx + dw, by + 70, 40, self._get_tpms_color(rr),
-      font=self._font_display, border_width=1.0, shadow_offset=4.0, align='center_bottom',
+      self._get_tpms_text(rr), bx + dw, by + 70, 40, _tpms_col(rr),
+      font=self._font_display, border_width=1.0, shadow_offset=4.0,
+      border_color=border_color, shadow_color=shadow_color, align='center_bottom',
     )
 
   def _get_turn_info_hud_data(self) -> dict:

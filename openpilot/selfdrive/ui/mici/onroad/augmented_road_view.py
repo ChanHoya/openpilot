@@ -26,6 +26,8 @@ from enum import IntEnum
 from openpilot.selfdrive.ui.mici.onroad.traffic_light import TrafficLight
 import math
 from openpilot.common.params import Params
+from openpilot.selfdrive.ui.onroad.augmented_road_view import is_night_time
+from openpilot.selfdrive.ui.onroad.fsd_button import FsdButton
 
 OpState = log.SelfdriveState.OpenpilotState
 CALIBRATED = log.LiveCalibrationData.Status.calibrated
@@ -173,6 +175,7 @@ class AugmentedRoadView(CameraView):
     self._driver_state_renderer = DriverPreview(compact=True)
     self._confidence_ball = ConfidenceBall()
     self._traffic_light = TrafficLight()
+    self._fsd_button = FsdButton(width=80, height=34)
     self._offroad_label = UnifiedLabel("start the car to\nuse openpilot", 54, FontWeight.DISPLAY,
                                        text_color=rl.Color(255, 255, 255, int(255 * 0.9)),
                                        alignment=TextAlignment.CENTER,
@@ -214,8 +217,29 @@ class AugmentedRoadView(CameraView):
     else:
       self._offroad_label.set_text("start the car to\nuse openpilot")
 
+  def is_fsd_night_mode(self) -> bool:
+    try:
+      theme_mode = self.params.get_int("FsdThemeMode")
+    except Exception:
+      theme_mode = 0
+    if theme_mode == 1:
+      return False
+    if theme_mode == 2:
+      return True
+    return is_night_time()
+
+  def _render_fsd_background(self, rect: rl.Rectangle, is_night: bool = True) -> None:
+    if is_night:
+      rl.draw_rectangle_gradient_v(int(rect.x), int(rect.y), int(rect.width), int(rect.height),
+                                   rl.Color(12, 16, 24, 255), rl.Color(18, 24, 34, 255))
+    else:
+      rl.draw_rectangle_gradient_v(int(rect.x), int(rect.y), int(rect.width), int(rect.height),
+                                   rl.Color(135, 148, 168, 255), rl.Color(102, 114, 132, 255))
+
   def _handle_mouse_release(self, mouse_pos: MousePos):
-    # Don't trigger click callback if bookmark was triggered
+    # Don't trigger click callback if FSD button or bookmark was triggered
+    if hasattr(self, '_fsd_button') and (self._fsd_button.is_pressed or rl.check_collision_point_rec(mouse_pos, self._fsd_button.rect)):
+      return
     if not self._bookmark_icon.interacting():
       super()._handle_mouse_release(mouse_pos)
 
@@ -251,9 +275,13 @@ class AugmentedRoadView(CameraView):
     )
 
     road_view_mode = self._road_view_mode()
+    is_fsd = getattr(self._fsd_button, 'fsd_mode', False) if hasattr(self, '_fsd_button') else False
+    is_night = self.is_fsd_night_mode() if hasattr(self, 'is_fsd_night_mode') else True
     _t = time.monotonic()
     if self._suppress_camera_for_cluster or road_view_mode in (2, 3):
       rl.draw_rectangle_rec(self._content_rect, rl.BLACK)
+    elif is_fsd:
+      self._render_fsd_background(self._content_rect, is_night)
     else:
       # Render the base camera view
       super()._render(self._content_rect)
@@ -263,12 +291,14 @@ class AugmentedRoadView(CameraView):
 
     if not self._suppress_camera_for_cluster and road_view_mode in (0, 2):
       # Draw all UI overlays
+      if hasattr(self._model_renderer, 'set_fsd_mode'):
+        self._model_renderer.set_fsd_mode(is_fsd, is_night)
       _t = time.monotonic()
       timing.call('model', self._model_renderer.render, self._content_rect)
       model_ms = (time.monotonic() - _t) * 1000.0
 
-    if not self._suppress_camera_for_cluster:
-      # Fade out bottom of overlays for looks
+    if not self._suppress_camera_for_cluster and not is_fsd:
+      # Fade out bottom of overlays for looks (not needed in pure FSD view)
       _t = time.monotonic()
       rl.draw_texture_ex(self._fade_texture, rl.Vector2(self._content_rect.x, self._content_rect.y), 0.0, 1.0, rl.WHITE)
       extras_ms += (time.monotonic() - _t) * 1000.0
@@ -280,6 +310,8 @@ class AugmentedRoadView(CameraView):
     self._hud_renderer.set_can_draw_top_icons(alert_to_render is None)
     self._hud_renderer.set_wheel_critical_icon(alert_to_render is not None and not not_animating_out and
                                                alert_to_render.visual_alert == car.CarControl.HUDControl.VisualAlert.steerRequired)
+    if hasattr(self._hud_renderer, 'set_fsd_theme'):
+      self._hud_renderer.set_fsd_theme(is_fsd, is_night)
     # TODO: have alert renderer draw offroad mici label below
     _t = time.monotonic()
     self._hud_renderer.render(self._content_rect)
@@ -294,6 +326,15 @@ class AugmentedRoadView(CameraView):
     _t = time.monotonic()
     rl.draw_rectangle_rounded_lines_ex(self._content_rect, 0.2 * 1.02, 10, 50, rl.BLACK)
     extras_ms += (time.monotonic() - _t) * 1000.0
+
+    # Custom UI extension point - add custom overlays here
+    # Use self._content_rect for positioning within camera bounds
+    if hasattr(self, '_fsd_button'):
+      fsd_w = 80
+      fsd_h = 34
+      fsd_x = self._content_rect.x + self._content_rect.width - fsd_w - 12
+      fsd_y = self._content_rect.y + 55
+      self._fsd_button.render(rl.Rectangle(fsd_x, fsd_y, fsd_w, fsd_h))
 
     # End clipping region
     rl.end_scissor_mode()

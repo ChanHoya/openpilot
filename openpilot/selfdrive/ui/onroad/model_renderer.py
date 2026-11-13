@@ -19,6 +19,7 @@ from openpilot.selfdrive.ui.road_markings import (
   lane_dash_segments, project_lane_segments, project_blindspot_barrier, blindspot_barrier_quads,
 )
 from openpilot.system.ui.lib.application import gui_app, FontWeight
+from openpilot.system.ui.lib.text_measure import measure_text_cached
 from openpilot.system.ui.lib.text_draw import draw_text_ui_style
 from openpilot.system.ui.lib.shader_polygon import draw_polygon, draw_polygon_solid, Gradient
 from openpilot.system.ui.lib import native_draw, native_geometry, native_text
@@ -97,6 +98,7 @@ class ModelRenderer(Widget):
     self._lane_lines = [ModelPoints() for _ in range(4)]
     self._road_edges = [ModelPoints() for _ in range(2)]
     self._acceleration_x = np.empty((0,), dtype=np.float32)
+    self._fsd_mode: bool = False
 
     # Transform matrix (3x3 for car space to screen space)
     self._car_space_transform = np.zeros((3, 3), dtype=np.float32)
@@ -122,6 +124,10 @@ class ModelRenderer(Widget):
   def set_transform(self, transform: np.ndarray):
     self._car_space_transform = transform.astype(np.float32)
     self._transform_dirty = True
+
+  def set_fsd_mode(self, enabled: bool, is_night: bool = True) -> None:
+    self._fsd_mode = enabled
+    self._fsd_is_night = is_night
 
   def _render(self, rect: rl.Rectangle):
     state = self._overlay_state
@@ -177,10 +183,13 @@ class ModelRenderer(Widget):
   def _draw_carrot_overlays(self, sm) -> None:
     timing = self._render_diagnostics
     timing.start()
-    timing.call('path', self._draw_path_carrot, sm)
-    timing.call('lanes', self._draw_lane_lines_carrot, sm)
-    timing.call('blindspot', self._draw_blind_spot_carrot, sm)
-    timing.call('radar', self._draw_radar_info_carrot, sm)
+    if getattr(self, '_fsd_mode', False):
+      timing.call('fsd', self._draw_fsd_visualization, sm)
+    else:
+      timing.call('path', self._draw_path_carrot, sm)
+      timing.call('lanes', self._draw_lane_lines_carrot, sm)
+      timing.call('blindspot', self._draw_blind_spot_carrot, sm)
+      timing.call('radar', self._draw_radar_info_carrot, sm)
     timing.values['native_draw'] = float(native_draw.active())
     timing.values['native_geometry'] = float(native_geometry.active())
     timing.values['native_text'] = float(native_text.active())
@@ -1627,3 +1636,300 @@ class ModelRenderer(Widget):
         white = rl.Color(255, 255, 255, 255)
         draw_text_ui_style(dir_label, tx, ty - 56.0, 72, white, font=self._font_display, align="center", y_offset=0.0)
         draw_text_ui_style(dist_str, tx, ty + 18.0, 52, white, font=self._font_display, align="center", y_offset=0.0)
+
+  def _draw_fsd_visualization(self, sm):
+    if not sm.valid['modelV2']:
+      return
+
+    lane_zero = self._lane_lines[0].raw_points
+    if lane_zero.shape[0] == 0:
+      return
+
+    is_night = getattr(self, '_fsd_is_night', True)
+    max_distance = float(np.clip(lane_zero[-1, 0], MIN_DRAW_DISTANCE, MAX_DRAW_DISTANCE))
+    max_idx = self._get_path_length_idx(lane_zero[:, 0], max_distance)
+
+    # 1. Driving Path Ribbon (Tesla FSD Cyan at night, Deep Royal Blue in day)
+    if self._path.raw_points.shape[0] > 0:
+      path_max_dist = float(np.clip(self._path.raw_points[-1, 0], MIN_DRAW_DISTANCE, MAX_DRAW_DISTANCE))
+      radar_state = sm['radarState'] if sm.valid['radarState'] else None
+      if radar_state and radar_state.leadOne and radar_state.leadOne.status:
+        lead_d = float(radar_state.leadOne.dRel)
+        path_max_dist = min(path_max_dist, max(lead_d - 1.5, 4.0))
+      p_idx = self._get_path_length_idx(self._path.raw_points[:, 0], path_max_dist)
+      path_poly = self._map_line_to_polygon(self._path.raw_points, 0.85, self._path_offset_z, p_idx, path_max_dist, allow_invert=False)
+      if path_poly.size > 0:
+        if is_night:
+          draw_polygon_solid(path_poly, rl.Color(0, 185, 255, 170))
+        else:
+          draw_polygon_solid(path_poly, rl.Color(28, 120, 238, 220))
+
+    # 2. 4 Lane Lines (Confident lanes only >= 0.35 to eliminate phantom straight lines)
+    for i, lane_line in enumerate(self._lane_lines):
+      if i >= len(self._lane_line_probs) or self._lane_line_probs[i] < 0.35:
+        continue
+      prob = float(self._lane_line_probs[i])
+      alpha = int(np.clip(prob * 255, 140, 255))
+      if i in (1, 2):
+        # Ego Left & Right Lanes
+        width_m = 0.055 if is_night else 0.065
+        pts = self._map_line_to_polygon(lane_line.raw_points, width_m, 0.0, max_idx, max_distance)
+        if pts.size > 0:
+          if is_night:
+            draw_polygon_solid(pts, rl.Color(255, 255, 255, alpha))
+          else:
+            # High-contrast solid white on slate road
+            draw_polygon_solid(pts, rl.Color(255, 255, 255, 255))
+      else:
+        # Adjacent Left & Right Lanes
+        width_m = 0.038 if is_night else 0.045
+        pts = self._map_line_to_polygon(lane_line.raw_points, width_m, 0.0, max_idx, max_distance)
+        if pts.size > 0:
+          if is_night:
+            draw_polygon_solid(pts, rl.Color(195, 210, 230, int(alpha * 0.70)))
+          else:
+            draw_polygon_solid(pts, rl.Color(240, 245, 255, int(alpha * 0.85)))
+
+    # 3. Blind Spot Barrier if active
+    if sm.valid['carState'] and (sm['carState'].leftBlindspot or sm['carState'].rightBlindspot):
+      self._draw_blind_spot_carrot(sm)
+
+    # 4. Lead Vehicles (Realistic 3D rear view + L1/L2 metric chip)
+    self._draw_fsd_lead_vehicles(sm, is_night)
+
+    # 5. Adjacent Vehicles (from radarState leadsLeft / leadsRight)
+    self._draw_fsd_adjacent_vehicles(sm, is_night)
+
+    # 6. Ego Vehicle (Driver POV Half-Steering Wheel at bottom center)
+    self._draw_fsd_ego_vehicle(sm, is_night)
+
+  def _draw_fsd_lead_vehicles(self, sm, is_night: bool = True):
+    radar_state = sm['radarState'] if sm.valid['radarState'] else None
+    if not radar_state:
+      return
+
+    leads = [(radar_state.leadOne, "L1"), (getattr(radar_state, 'leadTwo', None), "L2")]
+    for lead, tag in leads:
+      if not lead or not lead.status:
+        continue
+      d_rel = float(lead.dRel)
+      y_rel = float(lead.yRel)
+      v_rel = float(getattr(lead, 'vRel', 0.0))
+      v_rel_kph = v_rel * 3.6
+      if d_rel <= 2.0 or d_rel > 120.0:
+        continue
+
+      idx = self._get_path_length_idx(self._path.raw_points[:, 0], d_rel)
+      z = float(self._path.raw_points[idx, 2]) if idx < len(self._path.raw_points) else 0.0
+      pt = self._map_to_screen(d_rel, -y_rel, z + self._path_offset_z)
+      if not pt:
+        continue
+
+      x, y = pt
+      # Realistic perspective scaling: large when close (capped at 480px), natural falloff with distance
+      vw = float(np.clip(3600.0 / (d_rel + 4.5), 36.0, 480.0))
+      vh = float(vw * 0.72)
+
+      # 1. Ground shadow
+      rl.draw_ellipse(int(x), int(y + vh * 0.44), vw * 0.58, vh * 0.20, rl.Color(0, 0, 0, 120))
+
+      # 2. Rear tires
+      tire_w = max(vw * 0.14, 5.0)
+      tire_h = max(vh * 0.18, 5.0)
+      rl.draw_rectangle_rounded(rl.Rectangle(x - vw * 0.46, y + vh * 0.32, tire_w, tire_h), 0.4, 3, rl.Color(16, 20, 26, 255))
+      rl.draw_rectangle_rounded(rl.Rectangle(x + vw * 0.46 - tire_w, y + vh * 0.32, tire_w, tire_h), 0.4, 3, rl.Color(16, 20, 26, 255))
+
+      # 3. Main lower body & tapered upper cabin
+      cabin_w = vw * 0.82
+      cabin_rect = rl.Rectangle(x - cabin_w / 2, y - vh * 0.50, cabin_w, vh * 0.48)
+      lower_rect = rl.Rectangle(x - vw / 2, y - vh * 0.10, vw, vh * 0.55)
+
+      if is_night:
+        body_col = rl.Color(160, 170, 185, 250)
+        body_line = rl.Color(225, 235, 248, 255)
+        glass_col = rl.Color(18, 24, 32, 255)
+      else:
+        # Day: High-contrast deep metallic sapphire / charcoal
+        body_col = rl.Color(42, 52, 68, 250)
+        body_line = rl.Color(215, 228, 245, 255)
+        glass_col = rl.Color(22, 28, 38, 255)
+
+      rl.draw_rectangle_rounded(cabin_rect, 0.42, 6, body_col)
+      rl.draw_rectangle_rounded_lines_ex(cabin_rect, 0.42, 6, 1.5, body_line)
+
+      # 4. Rear glass
+      glass_w = cabin_w * 0.80
+      glass_h = vh * 0.32
+      rl.draw_rectangle_rounded(rl.Rectangle(x - glass_w / 2, y - vh * 0.44, glass_w, glass_h), 0.30, 4, glass_col)
+
+      # 5. Lower body & bumper
+      rl.draw_rectangle_rounded(lower_rect, 0.28, 6, body_col)
+      rl.draw_rectangle_rounded_lines_ex(lower_rect, 0.28, 6, 1.5, body_line)
+
+      # License plate recess
+      plate_w = vw * 0.30
+      plate_h = vh * 0.14
+      rl.draw_rectangle_rounded(rl.Rectangle(x - plate_w / 2, y + vh * 0.16, plate_w, plate_h), 0.25, 3, rl.Color(22, 26, 32, 230))
+
+      # 6. Taillights (sharp dual red LED bars across shoulder)
+      is_lead_braking = v_rel < -0.8
+      tail_w = max(vw * 0.28, 8.0)
+      tail_h = max(vh * 0.14, 4.0)
+      tail_y = y - vh * 0.05
+
+      if is_lead_braking:
+        tail_col = rl.Color(255, 25, 25, 255)
+        rl.draw_rectangle_rounded(rl.Rectangle(x - vw * 0.46 - 2, tail_y - 2, tail_w + 4, tail_h + 4), 0.5, 4, rl.Color(255, 40, 40, 110))
+        rl.draw_rectangle_rounded(rl.Rectangle(x + vw * 0.46 - tail_w - 2, tail_y - 2, tail_w + 4, tail_h + 4), 0.5, 4, rl.Color(255, 40, 40, 110))
+      else:
+        tail_col = rl.Color(235, 30, 30, 240) if is_night else rl.Color(215, 25, 25, 255)
+
+      rl.draw_rectangle_rounded(rl.Rectangle(x - vw * 0.46, tail_y, tail_w, tail_h), 0.5, 3, tail_col)
+      rl.draw_rectangle_rounded(rl.Rectangle(x + vw * 0.46 - tail_w, tail_y, tail_w, tail_h), 0.5, 3, tail_col)
+      if vw > 60:
+        bar_w = vw * 0.38
+        bar_h = max(tail_h * 0.40, 2.0)
+        rl.draw_rectangle_rounded(rl.Rectangle(x - bar_w / 2, tail_y + tail_h * 0.30, bar_w, bar_h), 0.4, 2, tail_col)
+
+      # 7. Distance and Speed chip (Carrot Cluster L1/L2 style)
+      if tag == "L1":
+        if abs(v_rel_kph) >= 1.0:
+          metric_str = f"L1 {d_rel:.0f}m  {v_rel_kph:+.0f}km/h"
+        else:
+          metric_str = f"L1 {d_rel:.0f}m"
+      else:
+        metric_str = f"L2 {d_rel:.0f}m"
+
+      # TTC (Time-to-collision) alert thresholds
+      ttc = -d_rel / v_rel if v_rel < -0.5 else 999.0
+      is_danger = ttc < 2.5
+      is_warning = ttc < 4.5
+
+      f_size = int(np.clip(vw * 0.20, 13, 24))
+      f_font = gui_app.font(FontWeight.BOLD)
+      t_size = measure_text_cached(f_font, metric_str, f_size)
+      pill_w = t_size.x + 18
+      pill_h = t_size.y + 8
+      pill_x = x - pill_w / 2
+      pill_y = y - vh * 0.50 - pill_h - 8
+
+      if is_danger:
+        chip_bg = rl.Color(190, 25, 25, 235)
+        chip_border = rl.Color(255, 80, 80, 255)
+        text_col = rl.Color(255, 255, 255, 255)
+      elif is_warning:
+        chip_bg = rl.Color(200, 115, 15, 235)
+        chip_border = rl.Color(255, 190, 30, 255)
+        text_col = rl.Color(255, 255, 255, 255)
+      elif is_night:
+        chip_bg = rl.Color(14, 18, 26, 230)
+        chip_border = rl.Color(0, 215, 255, 220) if tag == "L1" else rl.Color(120, 140, 170, 170)
+        text_col = rl.Color(0, 240, 255, 250) if tag == "L1" else rl.Color(190, 205, 225, 230)
+      else:
+        chip_bg = rl.Color(255, 255, 255, 245)
+        chip_border = rl.Color(16, 95, 210, 230) if tag == "L1" else rl.Color(135, 145, 160, 190)
+        text_col = rl.Color(16, 85, 190, 255) if tag == "L1" else rl.Color(45, 55, 70, 245)
+
+      pill_rec = rl.Rectangle(pill_x, pill_y, pill_w, pill_h)
+      rl.draw_rectangle_rounded(pill_rec, 0.45, 6, chip_bg)
+      rl.draw_rectangle_rounded_lines_ex(pill_rec, 0.45, 6, 1.2, chip_border)
+      rl.draw_text_ex(f_font, metric_str, rl.Vector2(pill_x + 9, pill_y + 4), f_size, 0, text_col)
+
+  def _draw_fsd_adjacent_vehicles(self, sm, is_night: bool = True):
+    radar_state = sm['radarState'] if sm.valid['radarState'] else None
+    if not radar_state:
+      return
+
+    adj_leads = list(radar_state.leadsLeft) + list(radar_state.leadsRight)
+    for lead in adj_leads:
+      if not lead or not getattr(lead, "status", False):
+        continue
+      d_rel = float(lead.dRel)
+      y_rel = float(lead.yRel)
+      if d_rel <= 2.0 or d_rel > 80.0:
+        continue
+
+      idx = self._get_path_length_idx(self._path.raw_points[:, 0], d_rel)
+      z = float(self._path.raw_points[idx, 2]) if idx < len(self._path.raw_points) else 0.0
+      pt = self._map_to_screen(d_rel, -y_rel, z + self._path_offset_z)
+      if not pt:
+        continue
+
+      x, y = pt
+      vw = float(np.clip(2800.0 / (d_rel + 4.5), 28.0, 240.0))
+      vh = float(vw * 0.70)
+
+      # Adjacent car box in neutral gray
+      rl.draw_ellipse(int(x), int(y + vh * 0.44), vw * 0.54, vh * 0.18, rl.Color(0, 0, 0, 90))
+      cabin_w = vw * 0.82
+      cabin_rect = rl.Rectangle(x - cabin_w / 2, y - vh * 0.50, cabin_w, vh * 0.48)
+      lower_rect = rl.Rectangle(x - vw / 2, y - vh * 0.10, vw, vh * 0.55)
+
+      adj_body = rl.Color(135, 142, 155, 220) if is_night else rl.Color(105, 115, 130, 240)
+      adj_line = rl.Color(170, 178, 190, 230) if is_night else rl.Color(50, 60, 75, 255)
+      rl.draw_rectangle_rounded(cabin_rect, 0.42, 5, adj_body)
+      rl.draw_rectangle_rounded_lines_ex(cabin_rect, 0.42, 5, 1.2, adj_line)
+      rl.draw_rectangle_rounded(lower_rect, 0.28, 5, adj_body)
+      rl.draw_rectangle_rounded_lines_ex(lower_rect, 0.28, 5, 1.2, adj_line)
+
+  def _draw_fsd_ego_vehicle(self, sm, is_night: bool = True):
+    # Driver POV: Minimalist upper half steering wheel at bottom center
+    rect = self._rect
+    center_x = rect.x + rect.width / 2
+    wheel_center_y = rect.y + rect.height + 25.0
+    r_outer = 112.0
+    r_inner = 88.0
+
+    car_state = sm['carState'] if sm.valid['carState'] else None
+    steer_angle = float(np.clip(-car_state.steeringAngleDeg, -75.0, 75.0)) if car_state else 0.0
+
+    start_ang = 180.0 + steer_angle
+    end_ang = 360.0 + steer_angle
+
+    # Soft ambient shadow behind wheel
+    rl.draw_ring(rl.Vector2(center_x, wheel_center_y + 4), r_inner - 4, r_outer + 6,
+                 start_ang, end_ang, 40, rl.Color(0, 0, 0, 110))
+
+    if is_night:
+      rim_col = rl.Color(30, 36, 46, 250)
+      rim_line = rl.Color(80, 95, 118, 240)
+      hub_col = rl.Color(22, 28, 36, 255)
+      hub_line = rl.Color(55, 68, 85, 230)
+      accent_col = rl.Color(0, 220, 255, 255)
+    else:
+      rim_col = rl.Color(42, 50, 62, 250)
+      rim_line = rl.Color(190, 202, 218, 255)
+      hub_col = rl.Color(32, 38, 48, 255)
+      hub_line = rl.Color(160, 175, 195, 240)
+      accent_col = rl.Color(22, 115, 232, 255)
+
+    # Main rim
+    rl.draw_ring(rl.Vector2(center_x, wheel_center_y), r_inner, r_outer,
+                 start_ang, end_ang, 40, rim_col)
+    rl.draw_ring_lines(rl.Vector2(center_x, wheel_center_y), r_inner, r_outer,
+                       start_ang, end_ang, 40, rim_line)
+
+    # 12 o'clock center alignment stripe
+    center_marker_ang = 270.0 + steer_angle
+    rl.draw_ring(rl.Vector2(center_x, wheel_center_y), r_inner - 0.5, r_outer + 0.5,
+                 center_marker_ang - 3.2, center_marker_ang + 3.2, 12, accent_col)
+
+    # Center steering hub upper curve
+    hub_r = 48.0
+    rl.draw_circle_sector(rl.Vector2(center_x, wheel_center_y), hub_r,
+                          start_ang, end_ang, 32, hub_col)
+    rl.draw_circle_sector_lines(rl.Vector2(center_x, wheel_center_y), hub_r,
+                                start_ang, end_ang, 32, hub_line)
+
+    # Center emblem dot
+    rl.draw_circle(int(center_x), int(wheel_center_y - 20), 8.0, accent_col)
+    rl.draw_circle(int(center_x), int(wheel_center_y - 20), 4.0, hub_col)
+
+    # Blindspot warning on wheel flanks
+    if car_state:
+      if car_state.leftBlindspot:
+        rl.draw_ring(rl.Vector2(center_x, wheel_center_y), r_inner - 2, r_outer + 4,
+                     start_ang, start_ang + 38.0, 16, rl.Color(255, 180, 0, 220))
+      if car_state.rightBlindspot:
+        rl.draw_ring(rl.Vector2(center_x, wheel_center_y), r_inner - 2, r_outer + 4,
+                     end_ang - 38.0, end_ang, 16, rl.Color(255, 180, 0, 220))

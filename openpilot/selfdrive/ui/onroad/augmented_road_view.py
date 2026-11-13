@@ -13,6 +13,7 @@ from openpilot.selfdrive.ui.onroad.model_renderer import ModelRenderer
 from openpilot.selfdrive.ui.render_diagnostics import RenderDiagnostics
 from openpilot.selfdrive.ui.overlay_state import OverlayState
 from openpilot.selfdrive.ui.onroad.cameraview import CameraView
+from openpilot.selfdrive.ui.onroad.fsd_button import FsdButton
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.text_draw import draw_text_ui_style
 from openpilot.common.transformations.camera import DEVICE_CAMERAS, DeviceCameraConfig, view_frame_from_device_frame
@@ -33,6 +34,14 @@ BORDER_COLORS = {
 WIDE_CAM_MAX_SPEED = 10.0  # m/s (22 mph)
 ROAD_CAM_MIN_SPEED = 15.0  # m/s (34 mph)
 INF_POINT = np.array([1000.0, 0.0, 0.0])
+
+
+def is_night_time(now_struct: time.struct_time | None = None) -> bool:
+  """Returns True if nighttime based on local driving time (06:30 ~ 18:30 is Day, 18:30 ~ 06:30 is Night)."""
+  if now_struct is None:
+    now_struct = time.localtime()
+  hour_float = now_struct.tm_hour + now_struct.tm_min / 60.0
+  return hour_float < 6.5 or hour_float >= 18.5
 
 
 class AugmentedRoadView(CameraView):
@@ -57,6 +66,7 @@ class AugmentedRoadView(CameraView):
     self._hud_renderer._overlay_state = self._overlay_state
     self.alert_renderer = AlertRenderer()
     self.driver_state_renderer = DriverPreview()
+    self._fsd_button = FsdButton()
 
     # debug
     self._pm = messaging.PubMaster(['uiDebug'])
@@ -117,20 +127,25 @@ class AugmentedRoadView(CameraView):
     )
 
     _t = time.monotonic()
+    is_night = self.is_fsd_night_mode()
     if self._suppress_camera_for_cluster:
       rl.draw_rectangle_rec(self._content_rect, rl.BLACK)
     else:
       # Render the base camera view
       timing.call('camera', super()._render, rect)
+      if self._fsd_button.fsd_mode:
+        self._render_fsd_background(self._content_rect, is_night)
     cam_ms = (time.monotonic() - _t) * 1000.0
 
     self._overlay_state.update(ui_state, self.client, self.stream_type, self._suppress_camera_for_cluster)
 
     if not self._suppress_camera_for_cluster:
       # Draw the model overlay only with the camera view
+      self.model_renderer.set_fsd_mode(self._fsd_button.fsd_mode, is_night)
       _t = time.monotonic()
       timing.call('model', self.model_renderer.render, self._content_rect)
       model_ms = (time.monotonic() - _t) * 1000.0
+    self._hud_renderer.set_fsd_theme(self._fsd_button.fsd_mode, is_night)
     _t = time.monotonic()
     timing.call('hud', self._hud_renderer.render, self._content_rect)  # includes plot when enabled
     hud_ms = (time.monotonic() - _t) * 1000.0
@@ -144,6 +159,11 @@ class AugmentedRoadView(CameraView):
 
     # Custom UI extension point - add custom overlays here
     # Use self._content_rect for positioning within camera bounds
+    fsd_w = 210
+    fsd_h = 78
+    fsd_x = self._content_rect.x + self._content_rect.width - fsd_w - 10
+    fsd_y = self._content_rect.y + 245
+    self._fsd_button.render(rl.Rectangle(fsd_x, fsd_y, fsd_w, fsd_h))
 
     # End clipping region
     rl.end_scissor_mode()
@@ -168,7 +188,12 @@ class AugmentedRoadView(CameraView):
     self._pm.send('uiDebug', msg)
     timing.finish()
 
-  def _handle_mouse_press(self, _):
+  def _handle_mouse_press(self, mouse_pos):
+    if self._fsd_button.is_pressed or rl.check_collision_point_rec(mouse_pos, self._fsd_button.rect):
+      return
+    for ev in gui_app.mouse_events:
+      if ev.left_pressed and rl.check_collision_point_rec(ev.pos, self._fsd_button.rect):
+        return
     if not self._hud_renderer.user_interacting() and self._click_callback is not None:
       self._click_callback()
 
@@ -179,9 +204,9 @@ class AugmentedRoadView(CameraView):
       preview.close()
     super().close()
 
-  def _handle_mouse_release(self, _):
-    # We only call click callback on press if not interacting with HUD
-    pass
+  def _handle_mouse_release(self, mouse_pos):
+    if self._fsd_button.is_pressed or rl.check_collision_point_rec(mouse_pos, self._fsd_button.rect):
+      return
 
   def _draw_border(self, rect: rl.Rectangle):
     rl.draw_rectangle_lines_ex(rect, UI_BORDER_SIZE, rl.BLACK)
@@ -289,8 +314,57 @@ class AugmentedRoadView(CameraView):
 
     return self._cached_matrix
 
+  def is_fsd_night_mode(self) -> bool:
+    try:
+      theme_mode = self._params.get_int("FsdThemeMode")
+      if theme_mode == 1:
+        return True
+      elif theme_mode == 2:
+        return False
+    except Exception:
+      pass
+    return is_night_time()
+
   def _get_border_color(self, status: UIStatus) -> rl.Color:
     return BORDER_COLORS.get(status, BORDER_COLORS[UIStatus.DISENGAGED])
+
+  def _render_fsd_background(self, rect: rl.Rectangle, is_night: bool = True) -> None:
+    horizon_h = int(rect.height * 0.40)
+    road_y = int(rect.y + horizon_h)
+    road_h = int(rect.height - horizon_h)
+
+    if is_night:
+      # Dark mode (Night: deep dark asphalt and navy horizon)
+      rl.draw_rectangle_gradient_v(
+        int(rect.x), int(rect.y), int(rect.width), horizon_h,
+        rl.Color(12, 16, 22, 255), rl.Color(18, 24, 34, 255),
+      )
+      rl.draw_rectangle_gradient_v(
+        int(rect.x), road_y, int(rect.width), road_h,
+        rl.Color(18, 24, 34, 255), rl.Color(24, 32, 44, 255),
+      )
+      rl.draw_line_ex(
+        rl.Vector2(rect.x, road_y),
+        rl.Vector2(rect.x + rect.width, road_y),
+        1.5,
+        rl.Color(42, 52, 70, 160),
+      )
+    else:
+      # Light mode (Day: rich medium slate asphalt road with soft sky horizon for high lane contrast)
+      rl.draw_rectangle_gradient_v(
+        int(rect.x), int(rect.y), int(rect.width), horizon_h,
+        rl.Color(158, 172, 192, 255), rl.Color(138, 152, 172, 255),
+      )
+      rl.draw_rectangle_gradient_v(
+        int(rect.x), road_y, int(rect.width), road_h,
+        rl.Color(122, 135, 154, 255), rl.Color(98, 110, 128, 255),
+      )
+      rl.draw_line_ex(
+        rl.Vector2(rect.x, road_y),
+        rl.Vector2(rect.x + rect.width, road_y),
+        1.5,
+        rl.Color(160, 175, 198, 200),
+      )
 
 
   def _draw_border_carrot(self, rect: rl.Rectangle):

@@ -422,3 +422,53 @@ def test_road_four_layers_path_tires_ego_lanes_and_edges(monkeypatch):
   # Outer adjacent lanes [0] and [3] must NOT be drawn
   adj_lanes = [c for _, c in drawn if (c.r, c.g, c.b) == view_3d_draw.PALETTE[True]['lane_adj'][:3]]
   assert len(adj_lanes) == 0
+
+
+def test_stationary_radar_and_path_noise_stabilized(monkeypatch):
+  import numpy as np
+  from openpilot.selfdrive.ui.onroad import view_3d_scene, view_3d_draw
+
+  polys, cars, chips = [], [], []
+  monkeypatch.setattr(view_3d_scene, "draw_polygon_solid", lambda pts, col: polys.append(pts))
+  monkeypatch.setattr(view_3d_draw, "draw_vehicle_rear",
+                      lambda x, y, vw, vh, night, style='lead', braking=False, alpha=1.0:
+                      cars.append((x, y, vw, vh)))
+  monkeypatch.setattr(view_3d_draw, "draw_metric_chip", lambda x, top_y, text, *a, **k: chips.append(text))
+  monkeypatch.setattr(view_3d_draw, "draw_steering_wheel", lambda *a, **k: None)
+  monkeypatch.setattr(view_3d_draw, "draw_windshield_frame", lambda *a, **k: None)
+
+  scene = view_3d_scene.View3dScene(view_3d_scene.C3_SIZES)
+  r = _scene_renderer()
+  boxes = []
+  path_tops = []
+  for i in range(20):
+    sign = 1.0 if i % 2 else -1.0
+    # Stopped path fluctuates wildly in length (3.6m..5.4m) and z (+-0.08m)
+    xs = np.linspace(0.0, 4.5 + 0.9 * sign, 33)
+    zs = (0.08 * sign) * (xs / xs[-1])
+    r._path.raw_points = np.stack((xs, np.zeros_like(xs), zs), axis=1).astype(np.float32)
+
+    # Stopped lead jittering +-0.25m in dRel and +-0.10m in yRel
+    radar = SimpleNamespace(leadOne=_lead(7.0 + 0.25 * sign, y=0.10 * sign, v=0.05 * sign), leadTwo=None)
+    sm = FakeSubMaster(carState=_car_state(v_ego=0.0), radarState=radar)
+
+    polys.clear()
+    cars.clear()
+    chips.clear()
+    scene.draw(r, sm, C3_RECT, True, now=i * 0.05)
+
+    assert len(cars) == 1
+    assert chips == ["L1 7m"]
+    boxes.append(cars[0])
+    # First polygon is the driving path ribbon; its minimum screen y is the far end tip.
+    path_tops.append(float(polys[0][:, 1].min()))
+
+  xs_box = [b[0] for b in boxes]
+  ys_box = [b[1] for b in boxes]
+  ws_box = [b[2] for b in boxes]
+  hs_box = [b[3] for b in boxes]
+  assert max(xs_box) - min(xs_box) < 1.5
+  assert max(ys_box) - min(ys_box) < 1.5
+  assert max(ws_box) - min(ws_box) < 1.5
+  assert max(hs_box) - min(hs_box) < 1.5
+  assert max(path_tops) - min(path_tops) < 1.5

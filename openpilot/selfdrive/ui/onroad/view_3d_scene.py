@@ -53,24 +53,129 @@ def _max_idx(xs: np.ndarray, distance: float) -> int:
   return int(idx[-1]) if idx.size else 0
 
 
+def _ema_alpha(dt: float, tau: float) -> float:
+  if tau <= 0.0:
+    return 1.0
+  dt_eff = dt if dt > 0.0 else 0.05
+  return float(1.0 - math.exp(-dt_eff / tau))
+
+
 class View3dScene:
   def __init__(self, sizes: SceneSizes):
     self.sizes = sizes
     self.camera = ChaseCamera()
     self._last_t: float | None = None
+    self._smooth_ground_z: float | None = None
+    self._smooth_path_max: float | None = None
+    self._smooth_drift: float | None = None
+    self._smooth_path_grid_y: np.ndarray | None = None
+    self._smooth_path_grid_z: np.ndarray | None = None
+    self._vehicle_tracks: dict[str, dict[str, float]] = {}
 
-  def _dt(self, now: float | None) -> float:
-    now = time.monotonic() if now is None else now
-    dt = 0.0 if self._last_t is None else float(np.clip(now - self._last_t, 0.0, 0.5))
-    self._last_t = now
-    return dt
+  def _dt(self, now: float | None) -> tuple[float, float]:
+    now_t = time.monotonic() if now is None else float(now)
+    dt = 0.0 if self._last_t is None else float(np.clip(now_t - self._last_t, 0.0, 0.5))
+    self._last_t = now_t
+    return dt, now_t
+
+  def _stabilize_vehicle(self, key: str, d_rel: float, y_rel: float, v_rel: float, z_rel: float,
+                         v_ego: float, dt: float, now_t: float) -> tuple[float, float, float, float, int]:
+    tr = self._vehicle_tracks.get(key)
+    stationary = v_ego < 0.3 and abs(v_rel) < 0.5
+    if tr is None or (now_t - tr['t']) > 1.5 or abs(d_rel - tr['d']) > 5.0 or abs(y_rel - tr['y']) > 2.5:
+      v_init = 0.0 if (stationary and abs(v_rel) < 0.4) else v_rel
+      z_init = 0.0 if v_ego < 0.3 else z_rel
+      disp_d = int(round(d_rel))
+      self._vehicle_tracks[key] = {
+        'd': d_rel, 'y': y_rel, 'v': v_init, 'z': z_init, 'disp_d': float(disp_d), 't': now_t,
+      }
+      return d_rel, y_rel, v_init, z_init, disp_d
+
+    if stationary:
+      if abs(d_rel - tr['d']) >= 0.55:
+        tr['d'] += (d_rel - tr['d']) * _ema_alpha(dt, 0.75)
+      if abs(y_rel - tr['y']) >= 0.25:
+        tr['y'] += (y_rel - tr['y']) * _ema_alpha(dt, 0.85)
+    else:
+      tau_d = 0.45 if abs(d_rel - tr['d']) < 0.08 else 0.18
+      tr['d'] += (d_rel - tr['d']) * _ema_alpha(dt, tau_d)
+      tr['y'] += (y_rel - tr['y']) * _ema_alpha(dt, 0.25)
+
+    tr['v'] += (v_rel - tr['v']) * _ema_alpha(dt, 0.30)
+    z_target = 0.0 if v_ego < 0.3 else z_rel
+    tr['z'] += (z_target - tr['z']) * _ema_alpha(dt, 0.60)
+    tr['t'] = now_t
+
+    v_out = 0.0 if (stationary and abs(tr['v']) < 0.4) else tr['v']
+    if abs(tr['d'] - tr['disp_d']) >= 0.65:
+      tr['disp_d'] = float(round(tr['d']))
+    return tr['d'], tr['y'], v_out, tr['z'], int(tr['disp_d'])
+
+  def _stabilize_path(self, path: np.ndarray, lanes: list, path_max: float, v_ego: float, dt: float) -> tuple[np.ndarray, float]:
+    stationary = v_ego < 0.3
+    if self._smooth_path_max is None:
+      self._smooth_path_max = path_max
+    elif not stationary or abs(path_max - self._smooth_path_max) >= 0.40:
+      tau_len = 1.0 if stationary else 0.22
+      self._smooth_path_max += (path_max - self._smooth_path_max) * _ema_alpha(dt, tau_len)
+    smooth_max = float(max(self._smooth_path_max, 2.0))
+
+    x_start = max(0.0, float(path[0, 0]))
+    if smooth_max <= x_start + 0.5:
+      smooth_max = x_start + 0.5
+    xs = np.linspace(x_start, smooth_max, 33, dtype=np.float64)
+
+    path_x = path[:, 0].astype(np.float64)
+    path_y = path[:, 1].astype(np.float64)
+    path_z = path[:, 2].astype(np.float64)
+    path_end_x = float(path_x[-1])
+
+    target_y = np.interp(xs, path_x, path_y)
+    target_z = np.interp(xs, path_x, path_z)
+
+    # Extend stopped/collapsed model path out to smooth_max cleanly using lane midpoint if available.
+    ext_mask = xs > path_end_x
+    if np.any(ext_mask) and len(lanes) >= 3:
+      l1 = getattr(lanes[1], 'raw_points', None)
+      l2 = getattr(lanes[2], 'raw_points', None)
+      if (l1 is not None and l2 is not None and l1.shape[0] >= 2 and l2.shape[0] >= 2
+          and l1[-1, 0] > path_end_x and l2[-1, 0] > path_end_x):
+        xs_ext = xs[ext_mask]
+        mid_ext = 0.5 * (np.interp(xs_ext, l1[:, 0], l1[:, 1]) + np.interp(xs_ext, l2[:, 0], l2[:, 1]))
+        mid_end = 0.5 * (np.interp(path_end_x, l1[:, 0], l1[:, 1]) + np.interp(path_end_x, l2[:, 0], l2[:, 1]))
+        target_y[ext_mask] = path_y[-1] + (mid_ext - mid_end)
+
+    if self._smooth_path_grid_y is None or self._smooth_path_grid_z is None:
+      self._smooth_path_grid_y = target_y.copy()
+      self._smooth_path_grid_z = target_z.copy()
+    elif stationary:
+      max_dy = float(np.max(np.abs(target_y - self._smooth_path_grid_y)))
+      max_dz = float(np.max(np.abs(target_z - self._smooth_path_grid_z)))
+      if max_dy >= 0.18:
+        self._smooth_path_grid_y += (target_y - self._smooth_path_grid_y) * _ema_alpha(dt, 0.90)
+      if max_dz >= 0.18:
+        self._smooth_path_grid_z += (target_z - self._smooth_path_grid_z) * _ema_alpha(dt, 0.90)
+    else:
+      alpha_p = _ema_alpha(dt, 0.12)
+      self._smooth_path_grid_y += (target_y - self._smooth_path_grid_y) * alpha_p
+      self._smooth_path_grid_z += (target_z - self._smooth_path_grid_z) * alpha_p
+
+    stab_path = np.stack((xs, self._smooth_path_grid_y, self._smooth_path_grid_z), axis=1).astype(np.float32)
+    return stab_path, smooth_max
 
   def draw(self, renderer, sm, rect, is_night: bool, now: float | None = None) -> None:
     path = renderer._path.raw_points
     lanes = renderer._lane_lines
     if path.shape[0] < 2 or len(lanes) == 0 or lanes[0].raw_points.shape[0] == 0:
       return
-    ground_z = float(renderer._path_offset_z)
+    dt, now_t = self._dt(now)
+    raw_ground_z = float(renderer._path_offset_z)
+    if self._smooth_ground_z is None:
+      self._smooth_ground_z = raw_ground_z
+    else:
+      self._smooth_ground_z += (raw_ground_z - self._smooth_ground_z) * _ema_alpha(dt, 0.50)
+    ground_z = self._smooth_ground_z
+
     car_state = sm['carState'] if sm.valid.get('carState', False) else None
     radar_state = sm['radarState'] if sm.valid.get('radarState', False) else None
     v_ego = float(getattr(car_state, 'vEgo', 0.0)) if car_state is not None else 0.0
@@ -78,22 +183,38 @@ class View3dScene:
     left_bs = bool(getattr(car_state, 'leftBlindspot', False))
     right_bs = bool(getattr(car_state, 'rightBlindspot', False))
     lead_one = _lead(radar_state, 'leadOne')
-    lead_d = float(lead_one.dRel) if lead_one is not None else None
+
+    # Prune stale vehicle tracks before updating active detections
+    for k in [k for k, tr in self._vehicle_tracks.items() if now_t - tr['t'] > 2.0]:
+      del self._vehicle_tracks[k]
+
+    stab_lead_d = None
+    if lead_one is not None and 0.5 < float(lead_one.dRel) <= MAX_LEAD_DISTANCE:
+      raw_d = float(lead_one.dRel)
+      stab_lead_d, _, _, _, _ = self._stabilize_vehicle(
+        'L1', raw_d, float(lead_one.yRel), float(getattr(lead_one, 'vRel', 0.0)),
+        _path_z(path, raw_d), v_ego, dt, now_t,
+      )
+    lead_d = stab_lead_d
 
     cam = self.camera
     curve_lat = _path_lateral(path, 30.0)
-    yaw = 0.5 * math.atan2(_path_lateral(path, 20.0), 20.0 + 4.0)
-    cam.update(rect, ground_z, zoom_target(v_ego, lead_d, curve_lat), yaw, self._dt(now))
+    if v_ego < 0.4 or float(path[-1, 0]) < 12.0:
+      yaw = 0.0
+    else:
+      yaw = 0.5 * math.atan2(_path_lateral(path, 20.0), 20.0 + 4.0)
+    cam.update(rect, ground_z, zoom_target(v_ego, lead_d, curve_lat), yaw, dt)
 
     lane_zero = lanes[0].raw_points
     max_distance = float(np.clip(lane_zero[-1, 0], MIN_DRAW_DISTANCE, MAX_DRAW_DISTANCE))
     max_idx = _max_idx(lane_zero[:, 0], max_distance)
 
-    # 1. Driving Path (center vehicle-width ribbon, clean without cluttering inner stripes)
-    path_max = float(np.clip(path[-1, 0], MIN_DRAW_DISTANCE, MAX_DRAW_DISTANCE))
+    # 1. Driving Path (center vehicle-width ribbon, clean and stabilized when stopped)
+    raw_path_max = float(np.clip(path[-1, 0], MIN_DRAW_DISTANCE, MAX_DRAW_DISTANCE))
     if lead_d is not None:
-      path_max = min(path_max, max(lead_d - 1.0, 2.0))
-    p_idx = _max_idx(path[:, 0], path_max)
+      raw_path_max = min(raw_path_max, max(lead_d - 1.0, 2.0))
+    stab_path, path_max = self._stabilize_path(path, lanes, raw_path_max, v_ego, dt)
+    p_idx = len(stab_path) - 1
 
     selfdrive_state = sm['selfdriveState'] if sm.valid.get('selfdriveState', False) else None
     long_active = bool(getattr(selfdrive_state, 'enabled', False)) if selfdrive_state is not None else False
@@ -131,7 +252,7 @@ class View3dScene:
       path_fill = view_3d_draw._c(0, 180, 50, 150) if is_night else view_3d_draw._c(*pal['path'])
 
     half_m = self.sizes.path_half_m
-    poly_path = cam.ribbon(path, half_m, ground_z, p_idx, path_max, y_shift=0.0)
+    poly_path = cam.ribbon(stab_path, half_m, ground_z, p_idx, path_max, y_shift=0.0)
     if poly_path.size:
       draw_polygon_solid(poly_path, path_fill)
 
@@ -159,7 +280,12 @@ class View3dScene:
       elif p_right < 0.3 and p_left > 0.3:
         right_m = 3.0 - left_m
       total = max(0.5, left_m + right_m)
-      drift = (right_m - left_m) / 2.0
+      raw_drift = (right_m - left_m) / 2.0
+      if self._smooth_drift is None:
+        self._smooth_drift = raw_drift
+      else:
+        self._smooth_drift += (raw_drift - self._smooth_drift) * _ema_alpha(dt, 0.80 if v_ego < 0.3 else 0.25)
+      drift = self._smooth_drift
       limit = max(0.1, total / 2.0 - 0.9)
       danger = abs(drift) / limit
 
@@ -181,7 +307,7 @@ class View3dScene:
       tire_offset = half_m + tire_half
       # Screen left = -Y, screen right = +Y.
       for y_shift, col in ((-tire_offset, col_l), (tire_offset, col_r)):
-        poly = cam.ribbon(path, tire_half, ground_z, p_idx, path_max, y_shift=y_shift)
+        poly = cam.ribbon(stab_path, tire_half, ground_z, p_idx, path_max, y_shift=y_shift)
         if poly.size:
           draw_polygon_solid(poly, col)
 
@@ -211,20 +337,35 @@ class View3dScene:
         if poly.size:
           draw_polygon_solid(poly, view_3d_draw.road_edge_color(std, is_night))
 
-    # 3. Vehicles far to near so closer cars overlap farther ones.
+    # 5. Vehicles far to near so closer cars overlap farther ones (with stationary noise filtering).
     vehicles = []
     if radar_state is not None:
       for lead, tag in ((lead_one, 'L1'), (_lead(radar_state, 'leadTwo'), 'L2')):
         if lead is not None and 0.5 < float(lead.dRel) <= MAX_LEAD_DISTANCE:
           if tag == 'L2' and lead_one is not None and abs(float(lead.dRel) - float(lead_one.dRel)) < 3.0:
             continue
-          vehicles.append((float(lead.dRel), float(lead.yRel), float(getattr(lead, 'vRel', 0.0)), tag))
+          if tag == 'L1' and 'L1' in self._vehicle_tracks:
+            tr = self._vehicle_tracks['L1']
+            v_l1 = 0.0 if (v_ego < 0.3 and abs(tr['v']) < 0.4) else tr['v']
+            vehicles.append((tr['d'], tr['y'], v_l1, tr['z'], int(tr['disp_d']), 'L1'))
+          else:
+            raw_d = float(lead.dRel)
+            sd, sy, sv, sz, disp_d = self._stabilize_vehicle(
+              tag, raw_d, float(lead.yRel), float(getattr(lead, 'vRel', 0.0)),
+              _path_z(path, raw_d), v_ego, dt, now_t,
+            )
+            vehicles.append((sd, sy, sv, sz, disp_d, tag))
       for name in ('leadsLeft', 'leadsRight'):
-        for lead in (getattr(radar_state, name, None) or []):
+        for idx_adj, lead in enumerate(getattr(radar_state, name, None) or []):
           if getattr(lead, 'status', False) and 1.0 < float(lead.dRel) <= MAX_ADJACENT_DISTANCE:
-            vehicles.append((float(lead.dRel), float(lead.yRel), 0.0, 'ADJ'))
-    for d_rel, y_rel, v_rel, tag in sorted(vehicles, key=lambda v: -v[0]):
-      box = cam.car_box(d_rel, -y_rel, _path_z(path, d_rel) + ground_z)
+            raw_d = float(lead.dRel)
+            sd, sy, sv, sz, disp_d = self._stabilize_vehicle(
+              f'ADJ_{name}_{idx_adj}', raw_d, float(lead.yRel), 0.0,
+              _path_z(path, raw_d), v_ego, dt, now_t,
+            )
+            vehicles.append((sd, sy, sv, sz, disp_d, 'ADJ'))
+    for d_rel, y_rel, v_rel, z_rel, disp_d, tag in sorted(vehicles, key=lambda v: -v[0]):
+      box = cam.car_box(d_rel, -y_rel, z_rel + ground_z)
       if box is None:
         continue
       x, y, vw, vh = box
@@ -232,7 +373,7 @@ class View3dScene:
       view_3d_draw.draw_vehicle_rear(x, y, vw, vh, is_night, style=style, braking=v_rel < -0.8 and tag != 'ADJ')
       if tag in ('L1', 'L2'):
         v_kph = v_rel * 3.6
-        text = f"{tag} {d_rel:.0f}m" + (f"  {v_kph:+.0f}km/h" if tag == 'L1' and abs(v_kph) >= 1.0 else "")
+        text = f"{tag} {disp_d}m" + (f"  {v_kph:+.0f}km/h" if tag == 'L1' and abs(v_kph) >= 1.0 else "")
         ttc = -d_rel / v_rel if v_rel < -0.5 else 999.0
         view_3d_draw.draw_metric_chip(x, y - vh * 0.5, text, vw, is_night, tag == 'L1', ttc < 2.5, ttc < 4.5,
                                       self.sizes.chip_min_font, self.sizes.chip_max_font)

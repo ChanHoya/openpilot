@@ -117,18 +117,18 @@ Ignoring `x0.01`, `x0.001`, `cm`, `km/h`, or `%` can make a value appear one hun
 
 ## Settings map
 
-The current `carrot_settings.json` contains **213 parameters**. The driver-monitoring exception and `NNFF` are search only; the remaining entries appear in these menus:
+The current `carrot_settings.json` contains **214 parameters**. The driver-monitoring exception and `NNFF` are search only; the remaining entries appear in these menus:
 
 | Category | Count | Groups |
 |---|---:|---|
-| Driving control | 136 | Startup and auto, Tesla, buttons and presets, steering, speed and deceleration, cruise and following gap |
+| Driving control | 137 | Startup and auto, Tesla, buttons and presets, steering, speed and deceleration, cruise and following gap |
 | Vehicle and hardware | 18 | Hyundai/Kia, CAN FD/HDA, radar, driver monitoring, vehicle assistance, device hardware |
 | Display | 34 | Information, path, brightness/on-road view, external HUD |
 | System | 12 | Recording/power, network/map, sound, software |
 
 ## Driving control
 
-These 136 settings can affect driving behavior. Change one item at a time.
+These 137 settings can affect driving behavior. Change one item at a time.
 
 <a id="start-auto"></a>
 ### Startup and auto — 9 settings; Tesla — 6 settings
@@ -166,13 +166,13 @@ The result depends heavily on whether the car uses stock SCC and which button me
 Volkswagen's separate `SET` button sets current speed and `RES` restores the previous set speed, while `+`/`-` follow the button mode, speed units, and long-press setting. Manual engagement with openpilot longitudinal control remains tied to the physical `SET`/`RES` buttons.
 
 <a id="vehicle-steering"></a>
-### Vehicle steering — 37 top-level + 6 ONNX detail + 1 search-only setting
+### Vehicle steering — 38 top-level + 6 ONNX detail + 1 search-only setting
 
 | Section | Parameters | Purpose |
 |---|---|---|
 | ONNX Lane and BSD | `ShareData`, `OnnxBsdEnabled`, `OnnxLaneThreshold`, `OnnxLaneIntervalMs`, `OnnxBsdThreshold`, `OnnxBsdSmoothingMs`, `OnnxBsdIntervalMs` | Lane-type detection plus separately controlled camera BSD and tuning |
 | Centering | `PathOffset`, `CameraYawTrimDeg` | Path position and camera-yaw trim |
-| Steering feel | `SteerActuatorDelay`, `LatSmoothSec`, `LatSuspendAngleDeg`, `CustomSR`, `SteerRatioRate` | Timing, smoothing, suspension angle, and steering ratio |
+| Steering feel | `SteerActuatorDelay`, `LatSmoothSec`, `CurveInnerBias`, `LatSuspendAngleDeg`, `CustomSR`, `SteerRatioRate` | Timing, smoothing, inner-curve guidance, suspension angle, and steering ratio |
 | [Lane change](lane-change.md) and automatic turn | `LaneChangeNeedTorque`, `LaneChangeDelay`, `LaneChangeBsd`, `LaneLineCheck`, `BlinkerLatchedTurn`, `LaneChangeLeverWait`, `AutoTurnControl`, `AutoTurnControlRightLaneChange`, `ManualLaneChangeIndicator`, `ManualTurnIndicator`, `ModelDesireIndicator`, `ModelPathIndicator`, `AutoTurnControlSpeedTurn`, `AutoTurnControlTurnEnd`, `AutoTurnMapChange` | Lane-change entry conditions and ATC behavior |
 | Lane mode | `LatMpcPathCost`, `LatMpcMotionCost`, `LatMpcAccelCost`, `LatMpcJerkCost`, `LatMpcSteeringRateCost`, `LatMpcInputOffset`, `UseLaneLineSpeed`, `UseLaneLineCurveSpeed`, `AdjustLaneOffset` | Lane-mode MPC weights and lane-line conditions |
 | Advanced torque | `LateralTorqueCustom`, `LateralTorqueAccelFactor`, `LateralTorqueFriction`, `LateralTorqueKpV`, `LateralTorqueKiV`, `LateralTorqueKf`, `LateralTorqueKd` | Custom torque-control gains |
@@ -184,6 +184,8 @@ Volkswagen's separate `SET` button sets current speed and `RES` restores the pre
 Even when lane mode is enabled through `UseLaneLineSpeed`, control temporarily switches to laneless if the model speed trajectory starts below 70% of measured vehicle speed or ends below 70% of its starting speed. Lane mode can resume after approximately one continuous second of acceptable speeds, provided the existing lane and speed conditions also pass.
 
 A larger `SteerActuatorDelay` compensates by commanding earlier. A larger `LatSmoothSec` is smoother but may respond more slowly. Changing both together makes diagnosis difficult.
+
+`CurveInnerBias` (Corner Inner-Lane Bias) ranges from `0–100%` with a default of `30%` (`0` = off). It combines preview curvature lead with lane-bounded inner bias during sharp curve entry to suppress outer-lane drift and guide smoothly toward the inside of the curve while damping inward overshoot past the target line. Adjust in steps of `10–15%` if the vehicle hugs the inner lane line too closely.
 
 `CenterToFrontRatio` is the **center of gravity ratio for all brands**. `0` uses the vehicle default; `31–69%` selects a ratio. Changes apply smoothly without restarting. Defaults: Hyundai/Kia/Genesis `40%`, Toyota/Lexus `44%`, Mazda `41%`, Volkswagen `45%`; Honda varies by model. Compare a small increase for late entry or a decrease for cutting inside; effects depend on lane mode and vehicle. Keep SAD and SR unchanged. Revert to the previous value or `0` if worse. Actual wheelbase stays unchanged; the input range is not a road-validated range.
 

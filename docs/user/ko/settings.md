@@ -117,18 +117,18 @@ Carrot Web 설정 화면에서는 다음 기능을 사용할 수 있습니다.
 
 ## 전체 설정 지도
 
-현재 `carrot_settings.json`에는 **213개 파라미터**가 있습니다. 운전자 감시 예외 설정과 `NNFF` 2개는 검색으로만 표시되며, 나머지는 아래 메뉴에 표시됩니다.
+현재 `carrot_settings.json`에는 **214개 파라미터**가 있습니다. 운전자 감시 예외 설정과 `NNFF` 2개는 검색으로만 표시되며, 나머지는 아래 메뉴에 표시됩니다.
 
 | 대분류 | 항목 수 | 중분류 |
 |---|---:|---|
-| 주행 제어 | 136 | 시작·오토, Tesla, 버튼·프리셋, 차량 조향, 속도·감속, 크루즈·차간 |
+| 주행 제어 | 137 | 시작·오토, Tesla, 버튼·프리셋, 차량 조향, 속도·감속, 크루즈·차간 |
 | 차량·하드웨어 | 18 | 현대·기아, CANFD·HDA, 레이더, 운전자 모니터링, 차량 보조, 기기 하드웨어 |
 | 화면 표시 | 34 | 정보 표시, 경로 표시, 밝기·주행화면, 외부 HUD |
 | 시스템 | 12 | 녹화·전원, 네트워크·지도, 사운드, 소프트웨어 |
 
 ## 주행 제어
 
-주행 제어는 주행 동작에 영향을 줄 수 있는 136개 항목입니다. 한 번에 여러 값을 변경하지 마세요.
+주행 제어는 주행 동작에 영향을 줄 수 있는 137개 항목입니다. 한 번에 여러 값을 변경하지 마세요.
 
 <a id="start-auto"></a>
 ### 시작·오토 — 9개; Tesla — 6개
@@ -166,13 +166,13 @@ Carrot Web 설정 화면에서는 다음 기능을 사용할 수 있습니다.
 폭스바겐의 별도 `SET`은 현재 속도 설정, `RES`는 이전 설정속도 복원에 사용하고, `+`·`-`는 버튼 모드·속도 단위·길게 누르기 설정을 따릅니다. 오픈파일럿 종방향 제어의 수동 인게이지 버튼은 기존 물리 `SET`·`RES`로 유지됩니다.
 
 <a id="vehicle-steering"></a>
-### 차량 조향 — 상위 37개 + ONNX 상세 6개 + 검색 전용 1개
+### 차량 조향 — 상위 38개 + ONNX 상세 6개 + 검색 전용 1개
 
 | 세부 구역 | 파라미터 | 용도 |
 |---|---|---|
 | ONNX 차선·BSD | `ShareData`, `OnnxBsdEnabled`, `OnnxLaneThreshold`, `OnnxLaneIntervalMs`, `OnnxBsdThreshold`, `OnnxBsdSmoothingMs`, `OnnxBsdIntervalMs` | 차선 종류 인식과 별도 카메라 BSD 실행 및 세부 조정 |
 | 중앙 보정 | `PathOffset`, `CameraYawTrimDeg` | 레인모드 경로의 좌우 위치와 카메라 YAW 미세 보정 |
-| 조향감 | `SteerActuatorDelay`, `LatSmoothSec`, `LatSuspendAngleDeg`, `CustomSR`, `SteerRatioRate` | 조향 시점, 평활화, 일시중지 각도와 조향비 |
+| 조향감 | `SteerActuatorDelay`, `LatSmoothSec`, `CurveInnerBias`, `LatSuspendAngleDeg`, `CustomSR`, `SteerRatioRate` | 조향 시점, 평활화, 코너 안쪽 유도, 일시중지 각도와 조향비 |
 | [차로 변경](lane-change.md)·자동 턴 | `LaneChangeNeedTorque`, `LaneChangeDelay`, `LaneChangeBsd`, `LaneLineCheck`, `BlinkerLatchedTurn`, `LaneChangeLeverWait`, `AutoTurnControl`, `AutoTurnControlRightLaneChange`, `ManualLaneChangeIndicator`, `ManualTurnIndicator`, `ModelDesireIndicator`, `ModelPathIndicator`, `AutoTurnControlSpeedTurn`, `AutoTurnControlTurnEnd`, `AutoTurnMapChange` | 차로 변경 진입 조건과 ATC 동작 |
 | 레인모드 | `LatMpcPathCost`, `LatMpcMotionCost`, `LatMpcAccelCost`, `LatMpcJerkCost`, `LatMpcSteeringRateCost`, `LatMpcInputOffset`, `UseLaneLineSpeed`, `UseLaneLineCurveSpeed`, `AdjustLaneOffset` | 레인모드 MPC 가중치와 차선 사용 조건 |
 | 고급 토크·토크 계수 | `LateralTorqueCustom`, `LateralTorqueAccelFactor`, `LateralTorqueFriction`, `LateralTorqueKpV`, `LateralTorqueKiV`, `LateralTorqueKf`, `LateralTorqueKd` | 커스텀 토크 제어 계수 |
@@ -184,6 +184,8 @@ Carrot Web 설정 화면에서는 다음 기능을 사용할 수 있습니다.
 `UseLaneLineSpeed`로 레인모드를 사용하더라도 모델 속도 궤적의 시작값이 실제 차속의 70% 미만이거나 끝값이 시작값의 70% 미만이면 일시적으로 레인리스로 전환합니다. 속도 조건이 약 1초간 연속으로 정상이고 기존 차선·속도 조건도 충족해야 레인모드로 복귀합니다.
 
 `SteerActuatorDelay`는 높을수록 더 일찍 조향하도록 보상하고, `LatSmoothSec`는 높을수록 부드러워지는 대신 반응이 늦어질 수 있습니다. 두 값을 동시에 바꾸면 원인을 구분하기 어렵습니다.
+
+`CurveInnerBias`(코너 안쪽 유도 강도)의 범위는 `0–100%`, 기본값은 `30%`이며 `0`은 기능 끄기입니다. 급커브 진입 시 전방 선행 곡률 피드포워드와 차선 경계 내 안쪽 바이어스를 결합해 바깥쪽 차선으로 밀리는 현상을 억제하고 코너 초입부터 안쪽 차선으로 선제 유도하며, 이미 안쪽 목표에 진입한 구간에서는 오버슈트를 완화합니다. 과도하면 코너 안쪽 차선에 바짝 붙을 수 있으므로 `10–15%` 단위로 조절하세요.
 
 `CenterToFrontRatio`는 전 차종 공통 **무게중심 비율**입니다. `0`은 차종별 기본값, `31~69%`는 지정한 비율이며 저장하면 재시작 없이 부드럽게 반영됩니다. 기본값은 현대·기아·제네시스 `40%`, 토요타·렉서스 `44%`, 마쓰다 `41%`, 폭스바겐 `45%`이며 혼다는 차종별로 다릅니다. 진입이 늦으면 소폭 증가, 초입에 파고들면 소폭 감소를 비교하되 효과는 차선 모드·차량에 따라 다릅니다. SAD·SR은 유지하고 하나씩 조절하세요. 악화되면 이전 값이나 `0`으로 복원하세요. 실제 휠베이스는 바뀌지 않으며 범위는 주행 검증 범위를 뜻하지 않습니다.
 

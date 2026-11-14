@@ -23,7 +23,9 @@ from openpilot.common.transformations.model import get_warp_matrix
 from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
 from openpilot.selfdrive.controls.lib.desire_lib.boundary_observer import BoundaryObserver
 from openpilot.selfdrive.controls.lib.desire_lib.tesla_turn import turn_signal_context
-from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, smooth_value, get_curvature_from_plan
+from openpilot.selfdrive.controls.lib.drive_helpers import (get_accel_from_plan, smooth_value, get_curvature_from_plan,
+                                                           read_curve_inner_bias, compute_curve_entry_smooth_factor,
+                                                           compute_curve_inner_curvature_assist)
 from openpilot.selfdrive.modeld.parse_model_outputs import Parser
 from openpilot.selfdrive.modeld.compile_modeld import make_input_queues, WARP_INPUTS, POLICY_INPUTS
 from openpilot.selfdrive.modeld.fill_model_msg import fill_model_msg, fill_driving_model_data, fill_pose_msg, PublishState
@@ -75,7 +77,10 @@ def queue_usbgpu_error_tmux(params: Params, context: str) -> bool:
 
 
 def get_lat_smooth_seconds_dynamic(model_output: dict[str, np.ndarray],
-                                   base_lat_smooth_seconds: float) -> tuple[float, float, float]:
+                                   base_lat_smooth_seconds: float,
+                                   v_ego: float = 0.0,
+                                   lat_action_t: float = 0.3,
+                                   curve_inner_bias: float = 0.0) -> tuple[float, float, float]:
   if base_lat_smooth_seconds <= 0.0:
     return 0.0, 0.0, 0.0
 
@@ -85,14 +90,27 @@ def get_lat_smooth_seconds_dynamic(model_output: dict[str, np.ndarray],
     y_std_1s = 0.0
 
   extra_smooth_seconds = float(np.interp(y_std_1s, [0.15, 0.25], [0.0, base_lat_smooth_seconds * 2]))
-
-  dynamic_lat_smooth_seconds = float(np.clip(base_lat_smooth_seconds + extra_smooth_seconds, 0.0, 0.60))
+  if curve_inner_bias > 0.0 and 'plan' in model_output:
+    plan = model_output['plan'][0]
+    entry_factor = compute_curve_entry_smooth_factor(
+      plan[:, Plan.T_FROM_CURRENT_EULER][:, 2],
+      plan[:, Plan.ORIENTATION_RATE][:, 2],
+      ModelConstants.T_IDXS,
+      v_ego,
+      lat_action_t,
+      curve_inner_bias,
+    )
+    extra_smooth_seconds *= entry_factor
+    dynamic_lat_smooth_seconds = float(np.clip((base_lat_smooth_seconds + extra_smooth_seconds) * entry_factor, 0.0, 0.60))
+  else:
+    dynamic_lat_smooth_seconds = float(np.clip(base_lat_smooth_seconds + extra_smooth_seconds, 0.0, 0.60))
 
   return dynamic_lat_smooth_seconds, y_std_1s, extra_smooth_seconds
 
 
 def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
-                          lat_action_t: float, long_action_t: float, v_ego: float, lat_smooth_seconds: float, vEgoStopping: float) -> log.ModelDataV2.Action:
+                          lat_action_t: float, long_action_t: float, v_ego: float, lat_smooth_seconds: float, vEgoStopping: float,
+                          curve_inner_bias: float = 0.0, desire: int = 0, lane_change_prob: float = 0.0) -> log.ModelDataV2.Action:
   plan = model_output['plan'][0]
   desired_accel, should_stop, _, desired_velocity_now = get_accel_from_plan(plan[:,Plan.VELOCITY][:,0],
                                                    plan[:,Plan.ACCELERATION][:,0],
@@ -114,6 +132,22 @@ def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.
     desired_accel = model_output['action'][0,1]
     desired_curvature = model_output['action'][0,0] / (max(2.5, v_ego))**2
     #should_stop = (v_ego < 0.3 and desired_accel < 0.1)
+  if curve_inner_bias > 0.0:
+    lane_lines = model_output['lane_lines'][0, :, :, 0] if 'lane_lines' in model_output else None
+    lane_line_probs = model_output['lane_lines_prob'][0, 1::2] if 'lane_lines_prob' in model_output else None
+    desired_curvature = compute_curve_inner_curvature_assist(
+      desired_curvature,
+      plan[:, Plan.T_FROM_CURRENT_EULER][:, 2],
+      plan[:, Plan.ORIENTATION_RATE][:, 2],
+      ModelConstants.T_IDXS,
+      v_ego,
+      lat_action_t,
+      curve_inner_bias,
+      lane_lines=lane_lines,
+      lane_line_probs=lane_line_probs,
+      desire=desire,
+      lane_change_prob=lane_change_prob,
+    )
   desired_accel = smooth_value(desired_accel, prev_action.desiredAcceleration, LONG_SMOOTH_SECONDS)
   desired_velocity_now = smooth_value(desired_velocity_now, prev_action.desiredVelocity, LONG_SMOOTH_SECONDS)
 
@@ -427,6 +461,7 @@ def main(demo=False):
   frame = 0
   custom_lat_delay = 0.0
   lat_smooth_seconds = LAT_SMOOTH_SECONDS
+  curve_inner_bias = read_curve_inner_bias(params)
   vEgoStopping = get_stopping_speed(params)
   camera_yaw_trim_deg = params.get_float("CameraYawTrimDeg") * 0.01
   lat_delay_dynamic = lat_smooth_seconds
@@ -435,6 +470,8 @@ def main(demo=False):
   while True:
     loop_start, cpu_start = time.monotonic(), time.thread_time()
     frame += 1
+    if frame % 10 == 0:
+      curve_inner_bias = read_curve_inner_bias(params)
     if frame % 100 == 0:
       custom_lat_delay = params.get_float("SteerActuatorDelay") * 0.01
       lat_smooth_seconds = params.get_float("LatSmoothSec") * 0.01
@@ -564,13 +601,34 @@ def main(demo=False):
       lat_smooth_seconds_dynamic, y_std_1s, lat_smooth_extra = get_lat_smooth_seconds_dynamic(
           model_output,
           lat_smooth_seconds,
+          v_ego=v_ego,
+          lat_action_t=lat_action_t,
+          curve_inner_bias=curve_inner_bias,
         )
       if custom_lat_delay > 0.0:
         lat_delay_dynamic = custom_lat_delay + lat_smooth_seconds_dynamic
       else:
         lat_delay_dynamic = sm["liveDelay"].lateralDelay + lat_smooth_seconds_dynamic
 
-      action = get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego, lat_smooth_seconds_dynamic, vEgoStopping)
+      lane_change_prob_act = 0.0
+      desire_state_raw = model_output.get('desire_state')
+      if desire_state_raw is not None:
+        ds = np.asarray(desire_state_raw).reshape(-1)
+        if len(ds) > max(int(log.Desire.laneChangeLeft), int(log.Desire.laneChangeRight)):
+          lane_change_prob_act = float(ds[log.Desire.laneChangeLeft] + ds[log.Desire.laneChangeRight])
+
+      action = get_action_from_model(
+        model_output,
+        prev_action,
+        lat_action_t,
+        long_action_t,
+        v_ego,
+        lat_smooth_seconds_dynamic,
+        vEgoStopping,
+        curve_inner_bias=curve_inner_bias,
+        desire=desire,
+        lane_change_prob=lane_change_prob_act,
+      )
       prev_action = action
       fill_model_msg(modelv2_send, model_output, action,
                      publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,

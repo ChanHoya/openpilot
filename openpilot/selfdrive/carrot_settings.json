@@ -157,6 +157,7 @@
                 "SteerActuatorDelay",
                 "CenterToFrontRatio",
                 "LatSmoothSec",
+                "CurveInnerBias",
                 "LatSuspendAngleDeg",
                 "CustomSR",
                 "SteerRatioRate"
@@ -1067,6 +1068,28 @@
       "max": 30,
       "default": 13,
       "unit": 1
+    },
+    {
+      "group": "조향튜닝",
+      "name": "CurveInnerBias",
+      "title": "코너 안쪽 유도 강도",
+      "descr": "급커브 진입 시 차선 바깥쪽으로 밀렸다가 뒤늦게 안쪽으로 파고드는 현상을 줄이기 위해 코너 초입부터 안쪽 차선 방향으로 선제 유도합니다.\n0=끄기(순정 모델 궤적), 30=권장 기본값, 높을수록 코너 안쪽 유도 및 바깥쪽 밀림 억제가 강해집니다.\n과도하면 코너 안쪽 차선에 너무 붙을 수 있으니 10~15 단위로 조절하세요.",
+      "egroup": "LAT",
+      "etitle": "Corner Inner-Lane Bias",
+      "edescr": "Guides the vehicle toward the inside of the lane from corner entry to prevent drifting to the outside of a sharp curve and cutting in late.\n0=Off (stock model path), 30=Recommended default. Higher values increase inner-lane guidance and outer-drift suppression.\nAdjust in steps of 10–15 if the car hugs the inside line too closely.",
+      "cgroup": "转向",
+      "ctitle": "弯道内侧引导强度",
+      "cdescr": "在急弯入弯时提前向车道内侧引导，抑制先向外侧漂移再向内侧猛切的现象。\n0=关闭（原厂模型轨迹），30=推荐默认值，数值越大内侧引导与外侧防漂移越强。\n过高可能过于贴近弯道内侧线，请以10~15为单位微调。",
+      "min": 0,
+      "max": 100,
+      "default": 30,
+      "unit": 5,
+      "display_unit": "percent",
+      "zero_label": {
+        "ko": "0 · 끄기",
+        "en": "0 · Off",
+        "zh": "0 · 关闭"
+      }
     },
     {
       "group": "조향튜닝",

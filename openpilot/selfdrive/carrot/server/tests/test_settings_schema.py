@@ -754,3 +754,26 @@ def test_declared_nonzero_min_and_zero_labels_are_well_formed(params):
       assert item['min'] == item['default'] == 0
       assert 0 < item['nonzero_min'] <= item['max']
       assert set(item['zero_label']) == {'ko', 'en', 'zh'}
+
+
+def test_curve_inner_bias_is_registered_in_steer_feel_section(settings, params):
+  by_name = {p["name"]: p for p in params}
+  assert "CurveInnerBias" in by_name
+  bias = by_name["CurveInnerBias"]
+  assert (bias["min"], bias["max"], bias["default"], bias["unit"]) == (0, 100, 30, 5)
+  assert bias["display_unit"] == "percent"
+  assert set(bias["zero_label"]) == {"ko", "en", "zh"}
+  assert '{"CurveInnerBias", {PERSISTENT, INT, "30"}}' in PARAMS_KEYS_PATH.read_text(encoding="utf-8")
+
+  categories = build_menu_categories(settings, by_name)
+  steer_feel = next(
+    section
+    for category in categories
+    for group in category["groups"]
+    for section in group["sections"]
+    if section["id"] == "STEER_FEEL"
+  )
+  items = steer_feel["items"]
+  assert "CurveInnerBias" in items
+  assert items.index("CenterToFrontRatio") == items.index("SteerActuatorDelay") + 1
+  assert items.index("CurveInnerBias") == items.index("LatSmoothSec") + 1

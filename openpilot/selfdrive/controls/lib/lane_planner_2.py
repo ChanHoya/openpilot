@@ -6,6 +6,7 @@ from openpilot.common.realtime import DT_MDL
 # from openpilot.common.swaglog import cloudlog
 # from openpilot.common.logger import sLogger
 from openpilot.common.params import Params
+from openpilot.selfdrive.controls.lib.drive_helpers import read_curve_inner_bias
 
 TRAJECTORY_SIZE = 33
 # positive numbers go right
@@ -161,9 +162,15 @@ class LanePlanner:
     self.adjustLaneOffset = float(self.params.get_int("AdjustLaneOffset")) * 0.01
     self.adjustCurveOffset = self.adjustLaneOffset #float(self.params.get_int("AdjustCurveOffset")) * 0.01
     ADJUST_OFFSET_LIMIT = 0.4 #max(self.adjustLaneOffset, self.adjustCurveOffset)
-    offset_curve = 0.0
-    ## curve offset
+    curve_inner_bias = read_curve_inner_bias(self.params) * 0.01
     offset_curve = np.interp(abs(curve_speed), [50, 200], [self.adjustCurveOffset, 0.0]) * np.sign(curve_speed)
+    if curve_inner_bias > 0.0 and abs(curve_speed) > 0.0:
+      inner_margin = max(0.0, 0.5 * clipped_lane_width - 1.22)
+      offset_inner_bias = np.interp(abs(curve_speed), [45, 160], [min(0.32 * curve_inner_bias, inner_margin), 0.0]) * np.sign(curve_speed)
+      if offset_curve * offset_inner_bias < 0:
+        offset_curve = offset_curve + offset_inner_bias
+      else:
+        offset_curve = max(offset_curve, offset_inner_bias, key=abs)
 
     offset_lane = 0.0
     if self.lane_width_left_filtered.x > 2.2 and self.lane_width_right_filtered.x > 2.2: #양쪽에 차로가 여유 있는경우
@@ -218,7 +225,13 @@ class LanePlanner:
       #self.lane_offset_filtered.x = 0.0
       pass
     else:
-      self.lane_offset_filtered.update(np.interp(self.d_prob, [0, 0.3], [0, offset_total]))
+      target_offset = np.interp(self.d_prob, [0, 0.3], [0, offset_total])
+      if curve_inner_bias > 0.0:
+        rc = (2.0 / 6.0) if abs(target_offset) > abs(self.lane_offset_filtered.x) else 0.7
+      else:
+        rc = 2.0
+      self.lane_offset_filtered.update_alpha(rc)
+      self.lane_offset_filtered.update(target_offset)
 
     ## laneless at lowspeed
     self.d_prob *= np.interp(v_ego*3.6, [5., 10.], [0.0, 1.0])

@@ -23,8 +23,8 @@ class SceneSizes:
   chip_max_font: int
   ego_lane_half_m: float = 0.075
   adj_lane_half_m: float = 0.06
-  road_edge_half_m: float = 0.065
-  path_half_m: float = 0.9
+  road_edge_half_m: float = 0.070
+  path_half_m: float = 0.80
 
 
 C3_SIZES = SceneSizes(wheel_radius_frac=0.104, wheel_drop_frac=0.023, chip_min_font=14, chip_max_font=26)
@@ -89,57 +89,27 @@ class View3dScene:
     max_distance = float(np.clip(lane_zero[-1, 0], MIN_DRAW_DISTANCE, MAX_DRAW_DISTANCE))
     max_idx = _max_idx(lane_zero[:, 0], max_distance)
 
-    # 1. Planned path (AR-View parity: Carrot two-quad ribbon with center & border lines)
+    # 1. Driving Path (center vehicle-width ribbon, clean without cluttering inner stripes)
     path_max = float(np.clip(path[-1, 0], MIN_DRAW_DISTANCE, MAX_DRAW_DISTANCE))
     if lead_d is not None:
       path_max = min(path_max, max(lead_d - 1.0, 2.0))
     p_idx = _max_idx(path[:, 0], path_max)
 
-    # 1A. Tire Trajectory (AR-View parity: lane-departure danger colored bands at +-0.9m)
-    model = sm['modelV2'] if sm.valid.get('modelV2', False) else None
-    if model is not None and len(getattr(model, 'laneLines', [])) >= 3 and len(getattr(model, 'laneLineProbs', [])) >= 3:
-      probs = model.laneLineProbs
-      left_y, right_y = model.laneLines[1].y, model.laneLines[2].y
-      if len(left_y) > 0 and len(right_y) > 0:
-        left_m = float(left_y[0])
-        right_m = -float(right_y[0])
-        if probs[1] < 0.3 and probs[2] > 0.3:
-          left_m = 3.0 - right_m
-        elif probs[2] < 0.3 and probs[1] > 0.3:
-          right_m = 3.0 - left_m
-        total = max(0.5, left_m + right_m)
-        drift = (right_m - left_m) / 2.0
-        limit = max(0.1, total / 2.0 - 0.9)
-        danger = abs(drift) / limit
-
-        green = view_3d_draw._c(0, 200, 0, 210)
-        warn = abs(drift) >= 0.5
-        pulse = warn and (int(time.monotonic() * 1000) % 800 < 400)
-        if warn:
-          side = view_3d_draw._c(255, 0, 0, 255) if pulse else view_3d_draw._c(255, 100, 0, 210)
-          col_l = side if drift > 0.0 else green
-          col_r = side if drift < 0.0 else green
-        elif drift > 0.02:
-          col_l, col_r = view_3d_draw.tire_grad_color(danger), green
-        elif drift < -0.02:
-          col_l, col_r = green, view_3d_draw.tire_grad_color(danger)
-        else:
-          col_l = col_r = green
-
-        tire_half = 0.16
-        for y_shift, col in ((0.9, col_l), (-0.9, col_r)):
-          poly = cam.ribbon(path, tire_half, ground_z, p_idx, path_max, y_shift=y_shift)
-          if poly.size:
-            draw_polygon_solid(poly, col)
-
-    # 1B. Driving Path (AR-View parity: Carrot two-quad ribbon with center & border lines)
-    brake_valid = bool(getattr(car_state, 'brakeLights', False)) if car_state is not None else False
     selfdrive_state = sm['selfdriveState'] if sm.valid.get('selfdriveState', False) else None
     long_active = bool(getattr(selfdrive_state, 'enabled', False)) if selfdrive_state is not None else False
     lp = sm['longitudinalPlan'] if sm.valid.get('longitudinalPlan', False) else None
     accel = float(lp.accels[0]) if lp is not None and len(getattr(lp, 'accels', [])) > 0 else 0.0
+    controls_state = sm['controlsState'] if sm.valid.get('controlsState', False) else None
+    active_lane = (bool(getattr(controls_state, 'activeLaneLine', False)) if controls_state is not None
+                   else bool(getattr(renderer, '_carrot_active_lane_line', False)))
 
-    show_color = getattr(renderer, '_carrot_show_path_color', 13)
+    if active_lane:
+      show_color = getattr(renderer, '_carrot_show_path_color_lane', getattr(renderer, '_carrot_show_path_color', 13))
+    else:
+      show_color = getattr(renderer, '_carrot_show_path_color_normal', getattr(renderer, '_carrot_show_path_color', 13))
+    if not long_active:
+      show_color = getattr(renderer, '_carrot_show_path_color_cruise_off', show_color)
+
     if show_color >= 20:
       if long_active:
         show_color = 13
@@ -158,31 +128,74 @@ class View3dScene:
       path_fill = carrot_colors[show_color % 10]
     else:
       pal = view_3d_draw.PALETTE[is_night]
-      path_fill = view_3d_draw._c(0, 180, 50, 160) if is_night else view_3d_draw._c(*pal['path'])
-
-    border_color = view_3d_draw._c(255, 40, 40, 240) if brake_valid else view_3d_draw._c(255, 255, 255, 240)
+      path_fill = view_3d_draw._c(0, 180, 50, 150) if is_night else view_3d_draw._c(*pal['path'])
 
     half_m = self.sizes.path_half_m
-    # Left and right quads
-    poly_l = cam.ribbon(path, half_m * 0.48, ground_z, p_idx, path_max, y_shift=half_m * 0.50)
-    if poly_l.size:
-      draw_polygon_solid(poly_l, path_fill)
-    poly_r = cam.ribbon(path, half_m * 0.48, ground_z, p_idx, path_max, y_shift=-half_m * 0.50)
-    if poly_r.size:
-      draw_polygon_solid(poly_r, path_fill)
+    poly_path = cam.ribbon(path, half_m, ground_z, p_idx, path_max, y_shift=0.0)
+    if poly_path.size:
+      draw_polygon_solid(poly_path, path_fill)
 
-    # Center divider line & outer borders
-    poly_c = cam.ribbon(path, 0.025, ground_z, p_idx, path_max, y_shift=0.0)
-    if poly_c.size:
-      draw_polygon_solid(poly_c, border_color)
-    poly_el = cam.ribbon(path, 0.025, ground_z, p_idx, path_max, y_shift=half_m)
-    if poly_el.size:
-      draw_polygon_solid(poly_el, border_color)
-    poly_er = cam.ribbon(path, 0.025, ground_z, p_idx, path_max, y_shift=-half_m)
-    if poly_er.size:
-      draw_polygon_solid(poly_er, border_color)
+    # 2. Tire Trajectories flanking left & right edges of the driving path
+    probs = renderer._lane_line_probs
+    model = sm['modelV2'] if sm.valid.get('modelV2', False) else None
+    left_y0 = right_y0 = None
+    p_left = p_right = 0.0
+    if model is not None and len(getattr(model, 'laneLines', [])) >= 3 and len(getattr(model, 'laneLineProbs', [])) >= 3:
+      ly, ry = model.laneLines[1].y, model.laneLines[2].y
+      if len(ly) > 0 and len(ry) > 0:
+        left_y0, right_y0 = float(ly[0]), float(ry[0])
+        p_left, p_right = float(model.laneLineProbs[1]), float(model.laneLineProbs[2])
+    elif len(lanes) >= 3 and len(probs) >= 3 and lanes[1].raw_points.shape[0] > 0 and lanes[2].raw_points.shape[0] > 0:
+      left_y0 = float(lanes[1].raw_points[0, 1])
+      right_y0 = float(lanes[2].raw_points[0, 1])
+      p_left, p_right = float(probs[1]), float(probs[2])
 
-    # 2. Road edges and lane lines: road edges & adjacent lanes first, ego lanes on top.
+    if left_y0 is not None and right_y0 is not None:
+      # Device frame: -Y is left, +Y is right. Distance to left lane is -left_y0, to right lane is +right_y0.
+      left_m = -left_y0 if left_y0 <= 0.0 or right_y0 >= 0.0 else left_y0
+      right_m = right_y0 if right_y0 >= 0.0 or left_y0 <= 0.0 else -right_y0
+      if p_left < 0.3 and p_right > 0.3:
+        left_m = 3.0 - right_m
+      elif p_right < 0.3 and p_left > 0.3:
+        right_m = 3.0 - left_m
+      total = max(0.5, left_m + right_m)
+      drift = (right_m - left_m) / 2.0
+      limit = max(0.1, total / 2.0 - 0.9)
+      danger = abs(drift) / limit
+
+      green = view_3d_draw._c(0, 200, 0, 210)
+      warn = abs(drift) >= 0.5
+      pulse = warn and (int(time.monotonic() * 1000) % 800 < 400)
+      if warn:
+        side = view_3d_draw._c(255, 0, 0, 255) if pulse else view_3d_draw._c(255, 100, 0, 210)
+        col_l = side if drift > 0.0 else green
+        col_r = side if drift < 0.0 else green
+      elif drift > 0.02:
+        col_l, col_r = view_3d_draw.tire_grad_color(danger), green
+      elif drift < -0.02:
+        col_l, col_r = green, view_3d_draw.tire_grad_color(danger)
+      else:
+        col_l = col_r = green
+
+      tire_half = 0.12
+      tire_offset = half_m + tire_half
+      # Screen left = -Y, screen right = +Y.
+      for y_shift, col in ((-tire_offset, col_l), (tire_offset, col_r)):
+        poly = cam.ribbon(path, tire_half, ground_z, p_idx, path_max, y_shift=y_shift)
+        if poly.size:
+          draw_polygon_solid(poly, col)
+
+    # 3. Recognized Ego Lane Lines (status colored) outside the tire trajectories
+    for i in (1, 2):
+      if i >= len(lanes) or i >= len(probs) or probs[i] < view_3d_draw.LANE_MIN_PROB:
+        continue
+      prob = float(probs[i])
+      poly = cam.ribbon(lanes[i].raw_points, self.sizes.ego_lane_half_m, 0.0, max_idx, max_distance)
+      if poly.size:
+        blocked = view_3d_draw.lane_blocked(car_state, i)
+        draw_polygon_solid(poly, view_3d_draw.lane_color(i, prob, is_night, blocked, alpha=min(1.0, 0.70 + prob)))
+
+    # 4. Outermost Road Edges outside the lane lines
     road_edges = getattr(renderer, '_road_edges', None)
     road_edge_stds = getattr(renderer, '_road_edge_stds', None)
     if road_edges:
@@ -197,18 +210,6 @@ class View3dScene:
         poly = cam.ribbon(raw, self.sizes.road_edge_half_m, 0.0, edge_max_idx, max_distance)
         if poly.size:
           draw_polygon_solid(poly, view_3d_draw.road_edge_color(std, is_night))
-
-    probs = renderer._lane_line_probs
-    for i in (0, 3, 1, 2):
-      min_prob = view_3d_draw.LANE_MIN_PROB if i in (1, 2) else view_3d_draw.ADJ_LANE_MIN_PROB
-      if i >= len(lanes) or i >= len(probs) or probs[i] < min_prob:
-        continue
-      prob = float(probs[i])
-      half = self.sizes.ego_lane_half_m if i in (1, 2) else self.sizes.adj_lane_half_m
-      poly = cam.ribbon(lanes[i].raw_points, half, 0.0, max_idx, max_distance)
-      if poly.size:
-        blocked = view_3d_draw.lane_blocked(car_state, i)
-        draw_polygon_solid(poly, view_3d_draw.lane_color(i, prob, is_night, blocked, alpha=min(1.0, 0.65 + prob)))
 
     # 3. Vehicles far to near so closer cars overlap farther ones.
     vehicles = []
@@ -240,57 +241,14 @@ class View3dScene:
     self.draw_ego(rect, is_night, steer, left_bs, right_bs, ground_z)
 
   def draw_ego(self, rect, is_night: bool, steer_deg: float, left_bs: bool, right_bs: bool, ground_z: float = 1.22) -> None:
-    cam = self.camera
-    zoom = cam.zoom
-    car_alpha = float(np.clip((zoom - 0.20) / 0.45, 0.0, 1.0))
-
+    """Consistent windshield cockpit frame with steering wheel on the left driver side."""
     h = float(rect.height)
-    start_x = float(rect.x + rect.width / 2)
-    start_y = float(rect.y + h * (1.0 + self.sizes.wheel_drop_frac))
-    start_r = h * self.sizes.wheel_radius_frac
-
-    # Driver cockpit 3D position inside the vehicle:
-    # EGO_REAR_X_M is rear bumper (-2.6m). Driver seat wheel is about +1.4m ahead (-1.2m),
-    # left-hand drive side y=-0.32m, height 0.72m above ground.
-    cockpit_3d = (EGO_REAR_X_M + 1.4, -0.32, ground_z - 0.72)
-    cockpit_pt = cam.project_point(*cockpit_3d)
-    cockpit_scale = cam.scale_at(*cockpit_3d)
-
-    if cockpit_pt is not None and cockpit_scale > 0.0:
-      target_x, target_y = cockpit_pt
-      target_r = max(cockpit_scale * 0.18, 12.0)
-    else:
-      target_x, target_y = start_x, float(rect.y + h * 0.82)
-      target_r = max(start_r * 0.25, 15.0)
-
-    # Smoothstep interpolation from cruise bottom to cockpit interior
-    t = float(np.clip(zoom / 0.80, 0.0, 1.0))
-    t_smooth = t * t * (3.0 - 2.0 * t)
-    cur_x = start_x + (target_x - start_x) * t_smooth
-    cur_y = start_y + (target_y - start_y) * t_smooth
-    cur_r = start_r + (target_r - start_r) * t_smooth
-
-    # Wheel alpha: starts solid 1.0 in cruise, stays fully visible as it glides up into cockpit,
-    # then softly integrates once settled inside
-    wheel_alpha = float(np.clip(1.0 - (zoom - 0.70) / 0.30, 0.35, 1.0))
-
-    # 1. Halo under ego car (when car is appearing)
-    if car_alpha > 0.0:
-      box = cam.ego_box()
-      if box is not None:
-        x, y, vw, vh = box
-        view_3d_draw.draw_ego_halo(x, y + vh * 0.42, vw, is_night, left_bs, right_bs, car_alpha)
-
-    # 2. Steering wheel glides into cockpit
+    wheel_x = float(rect.x + rect.width * 0.40)
+    wheel_y = float(rect.y + h * (1.0 + self.sizes.wheel_drop_frac))
+    wheel_r = h * self.sizes.wheel_radius_frac
+    view_3d_draw.draw_windshield_frame(rect, wheel_x, is_night, left_bs, right_bs)
     steer = float(np.clip(-steer_deg, -75.0, 75.0))
-    view_3d_draw.draw_steering_wheel(cur_x, cur_y, cur_r, steer, is_night, left_bs, right_bs, wheel_alpha)
-
-    # 3. 3D Ego vehicle rear on top (its tinted rear windshield settles over the steering wheel)
-    if car_alpha > 0.0:
-      box = cam.ego_box()
-      if box is not None:
-        x, y, vw, vh = box
-        view_3d_draw.draw_vehicle_rear(x, y, vw, vh, is_night, style='ego', alpha=car_alpha)
+    view_3d_draw.draw_steering_wheel(wheel_x, wheel_y, wheel_r, steer, is_night, left_bs, right_bs, 1.0)
 
 
 # Backward compatibility aliases

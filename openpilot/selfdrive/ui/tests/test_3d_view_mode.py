@@ -25,17 +25,19 @@ def mock_gui_app(monkeypatch):
 
 
 class FakeParams:
-  def __init__(self, initial=False):
+  def __init__(self, initial=False, unknown_keys=()):
     self.data = {"View3dMode": initial, "FsdViewMode": initial}
+    self.unknown_keys = set(unknown_keys)
 
   def get_bool(self, key):
+    if key in self.unknown_keys:
+      raise KeyError(f"Unknown param key: {key}")
     return self.data.get(key, False)
 
   def put_bool(self, key, val):
+    if key in self.unknown_keys:
+      raise KeyError(f"Unknown param key: {key}")
     self.data[key] = bool(val)
-
-  def put_nonblocking(self, key, val):
-    pass
 
 
 def test_view_3d_button_toggle(monkeypatch):
@@ -50,11 +52,34 @@ def test_view_3d_button_toggle(monkeypatch):
   assert btn.view_3d_mode is True
   assert btn.fsd_mode is True
   assert fake_params.get_bool("View3dMode") is True
+  assert fake_params.get_bool("FsdViewMode") is True
 
   btn._handle_mouse_release(None)
   assert btn.view_3d_mode is False
   assert btn.fsd_mode is False
   assert fake_params.get_bool("View3dMode") is False
+  assert fake_params.get_bool("FsdViewMode") is False
+
+
+def test_view_3d_button_persists_ar_mode_after_1s_refresh(monkeypatch):
+  # Simulate device running without recompiled View3dMode in Cython params_pyx.
+  fake_params = FakeParams(initial=True, unknown_keys={"View3dMode"})
+  monkeypatch.setattr("openpilot.selfdrive.ui.onroad.view_3d_button.Params", lambda: fake_params)
+  now = [10.0]
+  monkeypatch.setattr("openpilot.selfdrive.ui.onroad.view_3d_button.time.monotonic", lambda: now[0])
+
+  btn = View3dButton(width=150, height=68)
+  assert btn.view_3d_mode is True
+
+  btn._handle_mouse_release(None)
+  assert btn.view_3d_mode is False
+  assert fake_params.get_bool("FsdViewMode") is False
+
+  # After 1.5s _render triggers periodic param sync: AR view must NOT snap back to 3D view.
+  now[0] = 11.5
+  btn._render(rl.Rectangle(0, 0, 150, 68))
+  assert btn.view_3d_mode is False
+  assert fake_params.get_bool("FsdViewMode") is False
 
 
 def test_model_renderer_view_3d_mode_switch():
@@ -232,115 +257,128 @@ def test_chase_camera_cruise_places_15m_lead_mid_screen(rect):
 
 
 @pytest.mark.parametrize("rect", [C3_RECT, C4_RECT])
-def test_chase_camera_wide_keeps_close_lead_visible_in_front_of_ego(rect):
-  from openpilot.selfdrive.ui.onroad.fsd_camera import ChaseCamera
+def test_windshield_camera_keeps_close_lead_visible(rect):
+  from openpilot.selfdrive.ui.onroad.view_3d_camera import ChaseCamera
   cam = ChaseCamera()
-  cam.update(rect, 1.22, 1.0, 0.0, 0.0)
+  cam.update(rect, 1.22, 0.0, 0.0, 0.0)
   for d in (1.5, 3.8, 5.0):
     x, y, vw, vh = cam.car_box(d, 0.0, 1.22)
     assert rect.y < y - vh / 2 and y + vh / 2 < rect.y + rect.height
-  _, lead_y, _, lead_h = cam.car_box(3.8, 0.0, 1.22)
-  ex, ey, ew, eh = cam.ego_box()
-  assert ey + eh / 2 <= rect.y + rect.height
-  assert lead_y + lead_h / 2 <= ey - eh / 2 + 0.01 * rect.height
-  assert ew < 0.25 * rect.width
+  _, lead_y, vw, lead_h = cam.car_box(3.8, 0.0, 1.22)
+  assert vw < 0.25 * rect.width
+  assert cam.ego_box() is None
 
 
 def test_zoom_target_rules():
-  from openpilot.selfdrive.ui.onroad.fsd_camera import zoom_target
+  from openpilot.selfdrive.ui.onroad.view_3d_camera import zoom_target
   assert zoom_target(20.0, None, 0.0) == 0.0
   assert zoom_target(20.0, 30.0, 0.5) == 0.0
-  assert zoom_target(3.0, 4.0, 0.0) == 1.0
-  assert zoom_target(0.0, 10.0, 0.0) >= 0.6
-  assert zoom_target(15.0, None, 6.5) == 1.0
-  assert 0.0 < zoom_target(15.0, 6.0, 0.0) < 1.0
+  assert zoom_target(3.0, 4.0, 0.0) == 0.0
+  assert zoom_target(0.0, 10.0, 0.0) == 0.0
+  assert zoom_target(15.0, None, 6.5) == 0.0
 
 
-def test_chase_camera_zoom_is_smoothed():
-  from openpilot.selfdrive.ui.onroad.fsd_camera import ChaseCamera
+def test_chase_camera_yaw_is_smoothed():
+  from openpilot.selfdrive.ui.onroad.view_3d_camera import ChaseCamera
   cam = ChaseCamera()
-  cam.update(C3_RECT, 1.22, 1.0, 0.0, 0.05)
-  assert 0.0 < cam.zoom < 0.2
+  cam.update(C3_RECT, 1.22, 0.0, 0.15, 0.05)
+  assert 0.0 < cam.yaw < 0.05
   for _ in range(60):
-    cam.update(C3_RECT, 1.22, 1.0, 0.0, 0.05)
-  assert cam.zoom > 0.99
+    cam.update(C3_RECT, 1.22, 0.0, 0.15, 0.05)
+  assert cam.yaw > 0.14
 
 
 def test_wide_ribbon_extends_beside_ego():
-  from openpilot.selfdrive.ui.onroad.fsd_camera import ChaseCamera
+  from openpilot.selfdrive.ui.onroad.view_3d_camera import ChaseCamera
   r = _scene_renderer()
   cam = ChaseCamera()
-  cam.update(C3_RECT, 1.22, 1.0, 0.0, 0.0)
+  cam.update(C3_RECT, 1.22, 0.0, 0.0, 0.0)
   poly = cam.ribbon(r._lane_lines[1].raw_points, 0.075, 0.0, 32, 100.0)
   assert poly.shape[1] == 2 and poly[:, 1].max() > C3_RECT.height * 0.95
 
 
+def test_vehicle_palette_white_lead_adj_and_black_ego():
+  from openpilot.selfdrive.ui.onroad import view_3d_draw
+  for is_night in (True, False):
+    pal = view_3d_draw.PALETTE[is_night]
+    for channel in range(3):
+      assert pal['lead_top'][channel] >= 245
+      assert pal['lead_bottom'][channel] >= 205
+      assert pal['adj_top'][channel] >= 235
+      assert pal['adj_bottom'][channel] >= 195
+      assert pal['ego_top'][channel] <= 75
+      assert pal['ego_bottom'][channel] <= 30
+
+
 def test_lane_color_states():
-  from openpilot.selfdrive.ui.onroad import fsd_draw
-  green = fsd_draw.lane_color(1, 0.9, True, False)
-  white = fsd_draw.lane_color(1, 0.4, True, False)
-  orange = fsd_draw.lane_color(2, 0.9, True, True)
+  from openpilot.selfdrive.ui.onroad import view_3d_draw
+  green = view_3d_draw.lane_color(1, 0.9, True, False)
+  white = view_3d_draw.lane_color(1, 0.4, True, False)
+  orange = view_3d_draw.lane_color(2, 0.9, True, True)
   assert green.g > green.r and green.g > green.b
   assert white.r > 230 and white.g > 230 and white.b > 230
   assert orange.r == 255 and orange.b == 0
-  assert fsd_draw.lane_blocked(_car_state(left_bs=True), 1)
-  assert not fsd_draw.lane_blocked(_car_state(left_bs=True), 2)
-  assert fsd_draw.lane_blocked(_car_state(right_code=1), 2)       # solid line
-  assert not fsd_draw.lane_blocked(_car_state(right_code=10), 2)  # dashed line
-  assert not fsd_draw.lane_blocked(_car_state(), 1)               # unclassified
+  assert view_3d_draw.lane_blocked(_car_state(left_bs=True), 1)
+  assert not view_3d_draw.lane_blocked(_car_state(left_bs=True), 2)
+  assert view_3d_draw.lane_blocked(_car_state(right_code=1), 2)       # solid line
+  assert not view_3d_draw.lane_blocked(_car_state(right_code=10), 2)  # dashed line
+  assert not view_3d_draw.lane_blocked(_car_state(), 1)               # unclassified
 
 
 @pytest.mark.parametrize("sizes_name,rect", [("C3_SIZES", C3_RECT), ("C4_SIZES", C4_RECT)])
 @pytest.mark.parametrize("is_night", [True, False])
-def test_scene_draws_close_stop_with_ego_car(monkeypatch, sizes_name, rect, is_night):
+def test_scene_draws_close_stop_in_windshield_view(monkeypatch, sizes_name, rect, is_night):
   from openpilot.selfdrive.ui.onroad import view_3d_scene, view_3d_draw
-  polys, cars, wheels = [], [], []
+  polys, cars, wheels, frames = [], [], [], []
   monkeypatch.setattr(view_3d_scene, "draw_polygon_solid", lambda pts, col: polys.append(pts))
   real_vehicle = view_3d_draw.draw_vehicle_rear
   monkeypatch.setattr(view_3d_draw, "draw_vehicle_rear",
                       lambda x, y, vw, vh, night, style='lead', braking=False, alpha=1.0:
                       (cars.append((style, y, vh)), real_vehicle(x, y, vw, vh, night, style, braking, alpha)))
   monkeypatch.setattr(view_3d_draw, "draw_steering_wheel", lambda *a, **k: wheels.append(a))
+  monkeypatch.setattr(view_3d_draw, "draw_windshield_frame", lambda *a, **k: frames.append(a))
 
   scene = view_3d_scene.View3dScene(getattr(view_3d_scene, sizes_name))
   radar = SimpleNamespace(leadOne=_lead(3.8, v=-1.0), leadTwo=_lead(30.0, 0.3), leadsLeft=[_lead(12.0, 3.5)], leadsRight=[])
   sm = FakeSubMaster(carState=_car_state(v_ego=0.0, left_bs=True), radarState=radar)
-  for i in range(40):
-    cars.clear()
-    wheels.clear()
-    scene.draw(_scene_renderer(), sm, rect, is_night, now=i * 0.05)
-  assert scene.camera.zoom > 0.95
+  scene.draw(_scene_renderer(), sm, rect, is_night, now=0.0)
+
   assert polys
   styles = [c[0] for c in cars]
-  assert styles[-1] == 'ego' and 'lead' in styles and 'adj' in styles
+  assert 'lead' in styles and 'adj' in styles and 'ego' not in styles
   lead = [c for c in cars if c[0] == 'lead'][-1]
-  assert lead[1] + lead[2] / 2 < rect.height  # close lead stays on screen
-  # Steering wheel transitions naturally into the vehicle cockpit interior
+  assert lead[1] + lead[2] / 2 < rect.height * 0.85  # close lead stays cleanly inside windshield
+  assert len(frames) == 1
   assert len(wheels) == 1
-  _wheel_x, wheel_y, wheel_r = wheels[0][0], wheels[0][1], wheels[0][2]
-  assert wheel_y < rect.height and wheel_r < rect.height * scene.sizes.wheel_radius_frac
+  wheel_x, wheel_y, wheel_r = wheels[0][0], wheels[0][1], wheels[0][2]
+  assert wheel_x < rect.x + rect.width * 0.48
+  assert wheel_y > rect.height and wheel_r == pytest.approx(rect.height * scene.sizes.wheel_radius_frac)
 
 
-def test_scene_cruise_shows_wheel_and_no_ego_car(monkeypatch):
+def test_scene_cruise_shows_left_wheel_and_no_ego_car(monkeypatch):
   from openpilot.selfdrive.ui.onroad import view_3d_scene, view_3d_draw
   cars, wheels = [], []
   monkeypatch.setattr(view_3d_scene, "draw_polygon_solid", lambda pts, col: None)
   monkeypatch.setattr(view_3d_draw, "draw_vehicle_rear", lambda *a, style='lead', **k: cars.append(style))
   monkeypatch.setattr(view_3d_draw, "draw_steering_wheel", lambda *a, **k: wheels.append(a))
+  monkeypatch.setattr(view_3d_draw, "draw_windshield_frame", lambda *a, **k: None)
   scene = view_3d_scene.View3dScene(view_3d_scene.C3_SIZES)
   sm = FakeSubMaster(carState=_car_state(v_ego=20.0), radarState=SimpleNamespace(leadOne=_lead(40.0), leadTwo=None))
   scene.draw(_scene_renderer(), sm, C3_RECT, True, now=0.0)
   assert cars == ['lead'] and wheels
+  assert wheels[0][0] < C3_RECT.width * 0.48
 
 
-def test_scene_sharp_curve_widens_view(monkeypatch):
-  from openpilot.selfdrive.ui.onroad import view_3d_scene
+def test_scene_sharp_curve_turns_yaw_without_zoom_jump(monkeypatch):
+  from openpilot.selfdrive.ui.onroad import view_3d_scene, view_3d_draw
   monkeypatch.setattr(view_3d_scene, "draw_polygon_solid", lambda pts, col: None)
+  monkeypatch.setattr(view_3d_draw, "draw_steering_wheel", lambda *a, **k: None)
+  monkeypatch.setattr(view_3d_draw, "draw_windshield_frame", lambda *a, **k: None)
   scene = view_3d_scene.View3dScene(view_3d_scene.C3_SIZES)
   sm = FakeSubMaster(carState=_car_state(v_ego=8.0, steer=90.0), radarState=SimpleNamespace(leadOne=None, leadTwo=None))
   for i in range(40):
     scene.draw(_scene_renderer(curve_y=8.0), sm, C3_RECT, False, now=i * 0.05)
-  assert scene.camera.zoom > 0.95 and scene.camera.yaw > 0.0
+  assert scene.camera.zoom == 0.0 and scene.camera.yaw > 0.0
 
 
 def test_both_renderers_route_to_scene(monkeypatch):
@@ -357,7 +395,7 @@ def test_both_renderers_route_to_scene(monkeypatch):
   assert calls == [(view_3d_scene.C3_SIZES, False), (view_3d_scene.C4_SIZES, True)]
 
 
-def test_road_edges_and_outer_lanes_drawn(monkeypatch):
+def test_road_four_layers_path_tires_ego_lanes_and_edges(monkeypatch):
   from openpilot.selfdrive.ui.onroad import view_3d_scene, view_3d_draw
 
   low_std_col = view_3d_draw.road_edge_color(0.2, is_night=True)
@@ -368,6 +406,7 @@ def test_road_edges_and_outer_lanes_drawn(monkeypatch):
   drawn = []
   monkeypatch.setattr(view_3d_scene, "draw_polygon_solid", lambda pts, col: drawn.append((pts, col)))
   monkeypatch.setattr(view_3d_draw, "draw_steering_wheel", lambda *a, **k: None)
+  monkeypatch.setattr(view_3d_draw, "draw_windshield_frame", lambda *a, **k: None)
 
   scene = view_3d_scene.View3dScene(view_3d_scene.C3_SIZES)
   sm = FakeSubMaster(carState=_car_state(v_ego=15.0), radarState=SimpleNamespace(leadOne=None, leadTwo=None))
@@ -376,9 +415,10 @@ def test_road_edges_and_outer_lanes_drawn(monkeypatch):
   r._road_edge_stds = [0.2, 2.5]  # Left valid (<2.0), Right filtered (>=2.0)
 
   scene.draw(r, sm, C3_RECT, True, now=0.0)
-  # Check at least 1 road edge polygon matches low_std_col.r and both outer lanes (prob=0.25) were drawn
+  # Exact 4-layer budget: 1 path + 2 tire tracks + 2 ego lanes + 1 valid road edge = 6 polygons
+  assert len(drawn) == 6
   red_edges = [c for _, c in drawn if c.r == low_std_col.r and c.b == low_std_col.b and c.g == low_std_col.g]
   assert len(red_edges) == 1
-  # Outer lanes use adj colour (190, 205, 225) in night mode
+  # Outer adjacent lanes [0] and [3] must NOT be drawn
   adj_lanes = [c for _, c in drawn if (c.r, c.g, c.b) == view_3d_draw.PALETTE[True]['lane_adj'][:3]]
-  assert len(adj_lanes) == 2
+  assert len(adj_lanes) == 0

@@ -38,25 +38,25 @@ def tire_grad_color(d: float, alpha: float = 1.0) -> rl.Color:
   return _c(int(r), int(g), 0, 220, alpha=alpha)
 
 
-# Palettes keep vehicles readable on the dark night tarmac and the light day tarmac.
+# Palettes: white lead/adjacent vehicles, black ego cockpit/vehicle, clear lanes & edges.
 PALETTE = {
   True: {   # night
     'path': (0, 190, 255, 120), 'path_edge': (0, 225, 255, 210),
     'lane_good': (0, 230, 118, 255), 'lane_weak': (245, 248, 252, 230), 'lane_block': (255, 145, 0, 255),
     'lane_adj': (190, 205, 225, 170),
-    'lead_top': (205, 214, 228, 255), 'lead_bottom': (120, 130, 146, 255), 'lead_edge': (235, 242, 252, 255),
-    'adj_top': (150, 158, 172, 235), 'adj_bottom': (92, 100, 114, 235), 'adj_edge': (175, 184, 198, 235),
-    'ego_top': (74, 80, 92, 255), 'ego_bottom': (26, 30, 38, 255), 'ego_edge': (140, 150, 168, 255),
-    'glass': (14, 20, 30, 255), 'halo': (0, 200, 255, 255),
+    'lead_top': (250, 252, 255, 255), 'lead_bottom': (210, 218, 230, 255), 'lead_edge': (150, 165, 185, 255),
+    'adj_top': (240, 244, 250, 245), 'adj_bottom': (198, 208, 220, 245), 'adj_edge': (145, 160, 180, 240),
+    'ego_top': (52, 58, 68, 255), 'ego_bottom': (16, 18, 24, 255), 'ego_edge': (140, 150, 168, 255),
+    'glass': (18, 24, 34, 255), 'halo': (0, 200, 255, 255),
   },
   False: {  # day
     'path': (24, 118, 238, 120), 'path_edge': (16, 95, 210, 230),
     'lane_good': (0, 185, 80, 255), 'lane_weak': (255, 255, 255, 255), 'lane_block': (245, 120, 0, 255),
     'lane_adj': (235, 242, 255, 200),
-    'lead_top': (78, 92, 116, 255), 'lead_bottom': (34, 42, 56, 255), 'lead_edge': (215, 228, 246, 255),
-    'adj_top': (125, 135, 150, 240), 'adj_bottom': (78, 88, 104, 240), 'adj_edge': (60, 70, 86, 255),
-    'ego_top': (62, 68, 80, 255), 'ego_bottom': (18, 22, 28, 255), 'ego_edge': (190, 200, 216, 255),
-    'glass': (18, 24, 34, 255), 'halo': (0, 150, 255, 255),
+    'lead_top': (252, 254, 255, 255), 'lead_bottom': (214, 222, 234, 255), 'lead_edge': (130, 145, 165, 255),
+    'adj_top': (244, 248, 252, 245), 'adj_bottom': (204, 214, 226, 245), 'adj_edge': (120, 135, 155, 240),
+    'ego_top': (48, 54, 64, 255), 'ego_bottom': (16, 18, 24, 255), 'ego_edge': (175, 185, 200, 255),
+    'glass': (22, 28, 38, 255), 'halo': (0, 150, 255, 255),
   },
 }
 
@@ -244,3 +244,47 @@ def draw_steering_wheel(x: float, center_y: float, r_outer: float, steer_deg: fl
     rl.draw_ring(c, r_inner - 2, r_outer + 4, start, start + 38.0, 16, _c(255, 120, 0, 230, alpha))
   if right_bs:
     rl.draw_ring(c, r_inner - 2, r_outer + 4, end - 38.0, end, 16, _c(255, 120, 0, 230, alpha))
+
+
+def draw_windshield_frame(rect, steer_x: float, is_night: bool, left_bs: bool, right_bs: bool,
+                          alpha: float = 1.0) -> None:
+  """Subtle front-windshield cowl, black ego hood edge, and left-side driver binnacle."""
+  if alpha <= 0.01:
+    return
+  x0, y0, w, h = float(rect.x), float(rect.y), float(rect.width), float(rect.height)
+  pal = PALETTE[is_night]
+
+  # Faint black ego hood crest peeking at the lower edge of the windshield.
+  rl.draw_ellipse(int(x0 + w * 0.50), int(y0 + h * 1.03), w * 0.36, h * 0.115, _c(*pal['ego_bottom'][:3], 185, alpha))
+  rl.draw_ellipse_lines(int(x0 + w * 0.50), int(y0 + h * 1.03), w * 0.36, h * 0.115, _c(*pal['ego_top'][:3], 170, alpha))
+
+  # Lower dashboard cowl shadow gradient across the bottom of the screen.
+  cowl_top = y0 + h * 0.87
+  rl.draw_rectangle_gradient_v(
+    int(x0), int(cowl_top), int(w), int(max(1.0, (y0 + h) - cowl_top)),
+    _c(12, 15, 20, 0, alpha), _c(10, 12, 16, 215, alpha),
+  )
+
+  # Subtle windshield base contour line separation between outside road and cockpit.
+  cowl_line_y = y0 + h * 0.945
+  line_col = _c(120, 138, 165, 95, alpha) if is_night else _c(75, 88, 108, 105, alpha)
+  rl.draw_line_ex(rl.Vector2(x0, cowl_line_y), rl.Vector2(x0 + w, cowl_line_y), max(1.0, h * 0.0025), line_col)
+
+  # Driver instrument binnacle arch behind the left-mounted steering wheel.
+  hood_rx = w * 0.125
+  hood_ry = h * 0.125
+  binnacle_y = y0 + h * 1.005
+  rl.draw_ellipse(int(steer_x), int(binnacle_y), hood_rx, hood_ry, _c(16, 20, 26, 225, alpha))
+  rl.draw_ellipse_lines(int(steer_x), int(binnacle_y), hood_rx, hood_ry,
+                        _c(*(95, 112, 138) if is_night else (145, 160, 180), 175, alpha))
+
+  # Thin translucent windshield A-pillar edges on far left/right corners.
+  pillar_w = max(w * 0.016, 4.0)
+  pillar_col = _c(12, 14, 18, 95, alpha)
+  rl.draw_rectangle(int(x0), int(y0), int(pillar_w), int(h), pillar_col)
+  rl.draw_rectangle(int(x0 + w - pillar_w), int(y0), int(pillar_w), int(h), pillar_col)
+  if left_bs:
+    rl.draw_rectangle(int(x0), int(y0 + h * 0.25), int(pillar_w * 1.3), int(h * 0.50), _c(255, 110, 0, 130, alpha))
+  if right_bs:
+    rl.draw_rectangle(int(x0 + w - pillar_w * 1.3), int(y0 + h * 0.25), int(pillar_w * 1.3), int(h * 0.50),
+                      _c(255, 110, 0, 130, alpha))

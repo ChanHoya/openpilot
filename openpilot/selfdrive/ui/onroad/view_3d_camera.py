@@ -1,9 +1,10 @@
-"""Virtual chase camera shared by the C3/C4 3D view.
+"""Virtual windshield camera shared by the C3/C4 3D view.
 
 Points use the calibrated device frame used by modelV2: x forward, y right,
 z down, origin at the road camera. The road surface is about ``ground_z``
-below the camera. The AR view keeps using the real camera transform; only the
-3D view uses this camera so close leads and sharp curves stay on screen.
+below the camera. The AR view keeps using the real camera transform; the 3D view
+uses a single consistent slightly-wide windshield perspective so cruising leads,
+close stopped leads, lanes, and road edges stay naturally framed.
 """
 from dataclasses import dataclass
 import math
@@ -20,32 +21,21 @@ class CameraPose:
   horizon_frac: float  # horizon row as a fraction of the view height
 
 
-# Cruise: driver-like view, slightly raised so a 15 m lead sits mid-screen.
-CRUISE_POSE = CameraPose(back_m=1.5, height_m=2.1, pitch_deg=7.0, focal_scale=0.62, horizon_frac=0.36)
-# Wide: elevated chase view that keeps the ego car and a close lead visible.
-WIDE_POSE = CameraPose(back_m=8.0, height_m=3.8, pitch_deg=14.0, focal_scale=0.54, horizon_frac=0.26)
+# Single unified windshield perspective: slightly wide eye-level cabin view.
+WINDSHIELD_POSE = CameraPose(back_m=1.8, height_m=1.65, pitch_deg=8.0, focal_scale=0.52, horizon_frac=0.36)
+CRUISE_POSE = WINDSHIELD_POSE
+WIDE_POSE = WINDSHIELD_POSE
 
 CAR_WIDTH_M = 1.85
 CAR_HEIGHT_M = 1.45
 EGO_REAR_X_M = -2.6  # rear bumper relative to the road camera
-CLOSE_LEAD_M = 8.0
-NEAR_LEAD_M = 4.0
-STOP_SPEED_MS = 1.5
-CURVE_LAT_START_M = 2.0
-CURVE_LAT_FULL_M = 6.0
 ZOOM_TIME_CONSTANT_S = 0.45
 MAX_YAW_DEG = 10.0
 
 
 def zoom_target(v_ego: float, lead_d: float | None, curve_lat_m: float) -> float:
-  """0 = cruise view, 1 = wide view."""
-  lead = 0.0
-  if lead_d is not None:
-    lead = float(np.clip((CLOSE_LEAD_M - lead_d) / (CLOSE_LEAD_M - NEAR_LEAD_M), 0.0, 1.0))
-    if v_ego < STOP_SPEED_MS and lead_d < 15.0:
-      lead = max(lead, 0.6)
-  curve = float(np.clip((abs(curve_lat_m) - CURVE_LAT_START_M) / (CURVE_LAT_FULL_M - CURVE_LAT_START_M), 0.0, 1.0))
-  return max(lead, curve)
+  """Unified windshield framing: no zoom oscillation."""
+  return 0.0
 
 
 class ChaseCamera:
@@ -57,7 +47,7 @@ class ChaseCamera:
     self._x0 = 0.0
     self._y0 = 0.0
     self._ground_z = 1.22
-    self._pose = CRUISE_POSE
+    self._pose = WINDSHIELD_POSE
 
   def update(self, rect, ground_z: float, target: float, yaw_rad: float, dt: float) -> None:
     alpha = 1.0 if dt <= 0 else 1.0 - math.exp(-dt / ZOOM_TIME_CONSTANT_S)
@@ -67,10 +57,7 @@ class ChaseCamera:
     self._x0, self._y0 = float(rect.x), float(rect.y)
     self._w, self._h = max(float(rect.width), 1.0), max(float(rect.height), 1.0)
     self._ground_z = float(ground_z)
-    t = self.zoom
-    lerp = lambda a, b: a + (b - a) * t  # noqa: E731
-    self._pose = CameraPose(*(lerp(getattr(CRUISE_POSE, f), getattr(WIDE_POSE, f))
-                              for f in ("back_m", "height_m", "pitch_deg", "focal_scale", "horizon_frac")))
+    self._pose = WINDSHIELD_POSE
 
   def _focal_base(self) -> float:
     # C3 is 2:1 and C4 is wider; keep vertical framing consistent on both.
@@ -123,11 +110,10 @@ class ChaseCamera:
              np.interp(max_distance, [p0[0], p1[0]], [p0[2], p1[2]])]
       pts = np.vstack((pts, end))
     pts = pts[pts[:, 0] >= 0.0]
-    if extend_back and len(pts) and self.zoom > 0.02:
-      # The wide view shows road beside and behind the ego car; extend the
-      # nearest model node backward so lanes do not start above the car.
+    if extend_back and len(pts) and pts[0, 0] > -0.2:
+      # Extend the nearest model node slightly behind the camera reference so ribbons reach the bottom edge.
       back = pts[0].copy()
-      back[0] = EGO_REAR_X_M - 1.5
+      back[0] = -0.2
       pts = np.vstack((back, pts))
     if len(pts) < 2:
       return np.empty((0, 2), dtype=np.float32)
@@ -144,20 +130,21 @@ class ChaseCamera:
       return np.empty((0, 2), dtype=np.float32)
     return np.concatenate((l_xy, r_xy[::-1])).astype(np.float32)
 
-  def car_box(self, x_rear: float, y: float, ground_z: float, max_width_frac: float = 0.34):
+  def car_box(self, x_rear: float, y: float, ground_z: float, max_width_frac: float = 0.24):
     """Screen centre, width and height for a car rear at the given point."""
     pt = self.project_point(x_rear, y, ground_z)
     if pt is None:
       return None
     scale = self.scale_at(x_rear, y, ground_z)
     vw = float(np.clip(CAR_WIDTH_M * scale, 0.025 * self._w, max_width_frac * self._w))
-    # An elevated camera also sees the roof, so the silhouette gets taller.
-    vh = vw * (CAR_HEIGHT_M / CAR_WIDTH_M) * (1.0 + 0.25 * self.zoom)
+    vh = vw * (CAR_HEIGHT_M / CAR_WIDTH_M) * 1.06
     sx, ground_y = pt
-    bottom = self._y0 + self._h * 0.97
+    bottom = self._y0 + self._h * 0.94
     if ground_y > bottom:
       ground_y = bottom
     return sx, ground_y - vh * 0.5, vw, vh
 
   def ego_box(self):
+    if self.zoom <= 0.02:
+      return None
     return self.car_box(EGO_REAR_X_M, 0.0, self._ground_z, max_width_frac=0.30)

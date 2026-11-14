@@ -14,22 +14,29 @@ class View3dButton(Widget):
     self._font_bold = gui_app.font(FontWeight.BOLD)
     self._font_semi_bold = gui_app.font(FontWeight.SEMI_BOLD)
     self._last_read_t = 0.0
-    self._view_3d_mode = self._read_param()
+    v3d = self._try_get_bool("View3dMode")
+    fsd = self._try_get_bool("FsdViewMode")
+    self._view_3d_mode = bool(v3d or fsd)
+    self._write_param(self._view_3d_mode)
+
+  def _try_get_bool(self, key: str) -> bool | None:
+    try:
+      return bool(self._params.get_bool(key))
+    except Exception:
+      return None
 
   def _read_param(self) -> bool:
-    try:
-      return bool(self._params.get_bool("View3dMode") or self._params.get_bool("FsdViewMode"))
-    except Exception:
-      return False
+    v3d = self._try_get_bool("View3dMode")
+    if v3d is not None:
+      return v3d
+    return bool(self._try_get_bool("FsdViewMode"))
 
   def _write_param(self, val: bool) -> None:
-    try:
-      self._params.put_bool("View3dMode", val)
-      self._params.put_nonblocking("View3dMode", "1" if val else "0")
-      self._params.put_bool("FsdViewMode", val)
-      self._params.put_nonblocking("FsdViewMode", "1" if val else "0")
-    except Exception:
-      pass
+    for key in ("FsdViewMode", "View3dMode"):
+      try:
+        self._params.put_bool(key, bool(val))
+      except Exception:
+        pass
 
   def set_rect(self, rect: rl.Rectangle) -> None:
     super().set_rect(rect)
@@ -46,6 +53,7 @@ class View3dButton(Widget):
   def _handle_mouse_release(self, _):
     super()._handle_mouse_release(_)
     self._view_3d_mode = not self._view_3d_mode
+    self._last_read_t = time.monotonic()
     self._write_param(self._view_3d_mode)
 
   def _render(self, rect: rl.Rectangle) -> None:
@@ -104,3 +112,4 @@ class View3dButton(Widget):
 
 # Backward compatibility alias
 FsdButton = View3dButton
+

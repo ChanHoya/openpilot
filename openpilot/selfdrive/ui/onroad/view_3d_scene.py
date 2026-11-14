@@ -22,7 +22,8 @@ class SceneSizes:
   chip_min_font: int
   chip_max_font: int
   ego_lane_half_m: float = 0.075
-  adj_lane_half_m: float = 0.05
+  adj_lane_half_m: float = 0.06
+  road_edge_half_m: float = 0.065
   path_half_m: float = 0.9
 
 
@@ -181,17 +182,33 @@ class View3dScene:
     if poly_er.size:
       draw_polygon_solid(poly_er, border_color)
 
-    # 2. Lane lines: adjacent first, ego lanes on top with green/white/orange state.
+    # 2. Road edges and lane lines: road edges & adjacent lanes first, ego lanes on top.
+    road_edges = getattr(renderer, '_road_edges', None)
+    road_edge_stds = getattr(renderer, '_road_edge_stds', None)
+    if road_edges:
+      for i, edge in enumerate(road_edges):
+        raw = getattr(edge, 'raw_points', None)
+        if raw is None or raw.shape[0] == 0:
+          continue
+        std = float(road_edge_stds[i]) if road_edge_stds is not None and i < len(road_edge_stds) else 1.0
+        if std >= view_3d_draw.ROAD_EDGE_MAX_STD:
+          continue
+        edge_max_idx = _max_idx(raw[:, 0], max_distance)
+        poly = cam.ribbon(raw, self.sizes.road_edge_half_m, 0.0, edge_max_idx, max_distance)
+        if poly.size:
+          draw_polygon_solid(poly, view_3d_draw.road_edge_color(std, is_night))
+
     probs = renderer._lane_line_probs
     for i in (0, 3, 1, 2):
-      if i >= len(lanes) or i >= len(probs) or probs[i] < view_3d_draw.LANE_MIN_PROB:
+      min_prob = view_3d_draw.LANE_MIN_PROB if i in (1, 2) else view_3d_draw.ADJ_LANE_MIN_PROB
+      if i >= len(lanes) or i >= len(probs) or probs[i] < min_prob:
         continue
       prob = float(probs[i])
       half = self.sizes.ego_lane_half_m if i in (1, 2) else self.sizes.adj_lane_half_m
       poly = cam.ribbon(lanes[i].raw_points, half, 0.0, max_idx, max_distance)
       if poly.size:
         blocked = view_3d_draw.lane_blocked(car_state, i)
-        draw_polygon_solid(poly, view_3d_draw.lane_color(i, prob, is_night, blocked, alpha=min(1.0, 0.55 + prob)))
+        draw_polygon_solid(poly, view_3d_draw.lane_color(i, prob, is_night, blocked, alpha=min(1.0, 0.65 + prob)))
 
     # 3. Vehicles far to near so closer cars overlap farther ones.
     vehicles = []

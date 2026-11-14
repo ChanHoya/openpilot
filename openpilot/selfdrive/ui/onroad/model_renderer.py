@@ -1659,6 +1659,8 @@ class ModelRenderer(Widget):
     """3D view: virtual chase camera that widens near close leads and sharp curves."""
     if not sm.valid['modelV2']:
       return
+    if hasattr(self, '_refresh_carrot_params'):
+      self._refresh_carrot_params(rl.get_time())
     if not hasattr(self, '_view_3d_scene'):
       self._view_3d_scene = View3dScene(C3_SIZES)
     is_night = getattr(self, '_view_3d_is_night', getattr(self, '_fsd_is_night', True))

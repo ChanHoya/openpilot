@@ -206,8 +206,11 @@ def _scene_renderer(curve_y=0.0):
   path = np.stack((xs, ys, np.zeros_like(xs)), axis=1).astype(np.float32)
   lanes = [SimpleNamespace(raw_points=np.stack((xs, ys + off, np.full_like(xs, 1.22)), axis=1).astype(np.float32))
            for off in (-5.4, -1.8, 1.8, 5.4)]
+  road_edges = [SimpleNamespace(raw_points=np.stack((xs, ys + off, np.full_like(xs, 1.22)), axis=1).astype(np.float32))
+                for off in (-7.2, 7.2)]
   return SimpleNamespace(_path=SimpleNamespace(raw_points=path), _lane_lines=lanes,
-                         _lane_line_probs=[0.4, 0.9, 0.42, 0.2], _path_offset_z=1.22)
+                         _lane_line_probs=[0.4, 0.9, 0.42, 0.2], _road_edges=road_edges,
+                         _road_edge_stds=[0.3, 0.4], _path_offset_z=1.22)
 
 
 C3_RECT = rl.Rectangle(0, 0, 2160, 1080)
@@ -352,3 +355,30 @@ def test_both_renderers_route_to_scene(monkeypatch):
   c4 = MiciModelRenderer()
   c4._draw_fsd_visualization(sm)
   assert calls == [(view_3d_scene.C3_SIZES, False), (view_3d_scene.C4_SIZES, True)]
+
+
+def test_road_edges_and_outer_lanes_drawn(monkeypatch):
+  from openpilot.selfdrive.ui.onroad import view_3d_scene, view_3d_draw
+
+  low_std_col = view_3d_draw.road_edge_color(0.2, is_night=True)
+  high_std_col = view_3d_draw.road_edge_color(1.8, is_night=True)
+  assert low_std_col.r > low_std_col.b
+  assert high_std_col.b > high_std_col.r
+
+  drawn = []
+  monkeypatch.setattr(view_3d_scene, "draw_polygon_solid", lambda pts, col: drawn.append((pts, col)))
+  monkeypatch.setattr(view_3d_draw, "draw_steering_wheel", lambda *a, **k: None)
+
+  scene = view_3d_scene.View3dScene(view_3d_scene.C3_SIZES)
+  sm = FakeSubMaster(carState=_car_state(v_ego=15.0), radarState=SimpleNamespace(leadOne=None, leadTwo=None))
+  r = _scene_renderer()
+  r._lane_line_probs = [0.25, 0.9, 0.9, 0.25]
+  r._road_edge_stds = [0.2, 2.5]  # Left valid (<2.0), Right filtered (>=2.0)
+
+  scene.draw(r, sm, C3_RECT, True, now=0.0)
+  # Check at least 1 road edge polygon matches low_std_col.r and both outer lanes (prob=0.25) were drawn
+  red_edges = [c for _, c in drawn if c.r == low_std_col.r and c.b == low_std_col.b and c.g == low_std_col.g]
+  assert len(red_edges) == 1
+  # Outer lanes use adj colour (190, 205, 225) in night mode
+  adj_lanes = [c for _, c in drawn if (c.r, c.g, c.b) == view_3d_draw.PALETTE[True]['lane_adj'][:3]]
+  assert len(adj_lanes) == 2

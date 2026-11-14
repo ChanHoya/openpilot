@@ -8,7 +8,9 @@ from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib import text_measure
 
 LANE_MIN_PROB = 0.30
+ADJ_LANE_MIN_PROB = 0.20
 LANE_GOOD_PROB = 0.50
+ROAD_EDGE_MAX_STD = 2.0
 
 
 def _c(r: int, g: int, b: int, a: int = 255, alpha: float = 1.0) -> rl.Color:
@@ -69,6 +71,17 @@ def lane_color(index: int, prob: float, is_night: bool, blocked: bool, alpha: fl
   if prob >= LANE_GOOD_PROB:
     return _c(*pal['lane_good'], alpha=alpha)
   return _c(*pal['lane_weak'], alpha=alpha)
+
+
+def road_edge_color(std: float, is_night: bool, alpha: float = 1.0) -> rl.Color:
+  """Road edge colour matching Carrot AR-view: red/magenta when confident, blue/purple when uncertain."""
+  temp_f = float(np.clip(std / ROAD_EDGE_MAX_STD, 0.0, 1.0))
+  conf = 1.0 - temp_f
+  r = int(conf * 255.0)
+  g = 20 if is_night else 0
+  b = int(temp_f * 255.0)
+  a = int(np.clip((0.55 + 0.45 * conf) * 240.0, 90.0, 245.0))
+  return _c(r, g, b, a, alpha=alpha)
 
 
 def lane_blocked(car_state, index: int) -> bool:

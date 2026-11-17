@@ -3,7 +3,7 @@ import math
 import os
 import time
 
-from openpilot.cereal import car
+from openpilot.cereal import car, log
 import openpilot.cereal.messaging as messaging
 from openpilot.cereal.services import SERVICE_LIST
 from openpilot.common.params import Params
@@ -18,6 +18,25 @@ from openpilot.selfdrive.monitoring.dm2_context import (AutomaticCancelFilter, C
 
 INPUT_FRESHNESS_SECONDS = 0.25
 SESSION_DISABLED_PARAM = "DriverMonitoringSessionDisabled"
+AlertLevel = log.DriverMonitoringState.AlertLevel
+
+
+def is_night_low_light(sm):
+  """Return True if camera exposure indicates dark or nighttime ambient lighting."""
+  for service in ('roadCameraState', 'wideRoadCameraState'):
+    if service in sm:
+      cam = sm[service]
+      exp = getattr(cam, 'exposureValPercent', 0.0)
+      if math.isfinite(exp) and exp > 50.0:
+        return True
+
+  if 'driverCameraState' in sm:
+    driver_cam = sm['driverCameraState']
+    exp = getattr(driver_cam, 'exposureValPercent', 0.0)
+    if math.isfinite(exp) and exp > 55.0:
+      return True
+
+  return False
 
 
 def traffic_observations(radar):
@@ -202,7 +221,7 @@ def run_dm2(params, experimental, initial_car_params=None):
   # worker starts, while Python's module cache can predate that environment.
   replay = "REPLAY" in os.environ
   services = ['carState', 'selfdriveState', 'modelV2', 'radarState', 'liveCalibration', 'carParams', 'driverStateV2',
-              'carControl', 'longitudinalPlan']
+              'carControl', 'longitudinalPlan', 'roadCameraState', 'wideRoadCameraState', 'driverCameraState']
   # Preserve driver-camera cadence on device. Replay uses modelV2 because a
   # disabled route intentionally has no driverStateV2 messages.
   sm = messaging.SubMaster(services, poll='modelV2' if replay else 'driverStateV2')
@@ -369,12 +388,23 @@ def run_dm2(params, experimental, initial_car_params=None):
                             cs.vEgo < dm.settings._ALERT_MIN_SPEED,
                             cs.gearShifter not in (car.CarState.GearShifter.drive, car.CarState.GearShifter.low))
     dm.update_parked_reset(now, parked_reset_eligible(sm, now, demo_mode))
-    packet = dm.get_state_packet(valid=valid or (demo_mode and camera_ok))
-    packet.driverMonitoringState.cameraUnavailable = not camera_ok
-    packet.driverMonitoringState.dm2Experimental = dm.experimental
-    packet.driverMonitoringState.dm2Disabled = False
-    packet.driverMonitoringState.dm2StrictTimeRemaining = max(0.0, traffic.strict_until - now)
-    packet.driverMonitoringState.dm2WheelTimeoutFactor = dm.wheel_factor
+    night_low_light = is_night_low_light(sm)
+    night_no_face_pause = night_low_light and not dm.face_detected and not demo_mode and valid
+
+    if night_no_face_pause:
+      # In dark/nighttime conditions where driver's face cannot be detected due to low lighting,
+      # pause DM alerts and prevent intrusive steering touch warnings.
+      dm._reset_awareness()
+      dm.alert_level = AlertLevel.none
+      packet = disabled_state_packet(rhd_saved, dm.experimental, dm, valid=valid, camera_unavailable=not camera_ok)
+    else:
+      packet = dm.get_state_packet(valid=valid or (demo_mode and camera_ok))
+      packet.driverMonitoringState.cameraUnavailable = not camera_ok
+      packet.driverMonitoringState.dm2Experimental = dm.experimental
+      packet.driverMonitoringState.dm2Disabled = False
+      packet.driverMonitoringState.dm2StrictTimeRemaining = max(0.0, traffic.strict_until - now)
+      packet.driverMonitoringState.dm2WheelTimeoutFactor = dm.wheel_factor
+
     pm.send('driverMonitoringState', packet)
     if camera_ok and rk.frame % 6000 == 0 and not demo_mode and dm.wheelpos_offsetter.filtered_stat.n > dm.settings._WHEELPOS_FILTER_MIN_COUNT:
       params.put_bool("IsRhdDetected", dm.wheel_on_right)

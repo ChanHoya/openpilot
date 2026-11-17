@@ -348,10 +348,22 @@ class CarrotPlanner:
   def check_model_stopping(self, v_cruise, v, v_ego, a_ego, model_x, y, d_rel):
     v_ego_kph = v_ego * CV.MS_TO_KPH
     model_v = self.vFilter.process(v[-1])
-    startSign = model_v > 5.0 or model_v > (v[0] + 2)
 
-    if v_ego_kph < 1.0:
-      stopSign = model_x < 20.0 and model_v < 10.0
+    # 출발 신호: 모드 2(Stop & Go)이고 정차 상태(0.5 km/h 이하)일 때만 유효.
+    # 감속 정차 접근 중(e2eStop)이거나 Mode 1(정차만)인 경우 출발 신호를 완전히 억제.
+    if self.xState == XState.e2eStop and v_ego_kph > 0.5:
+      startSign = False
+    elif self.trafficLightDetectMode != 2:
+      startSign = False
+    else:
+      startSign = model_v > 5.0 or model_v > (v[0] + 2)
+
+    # 정지 신호:
+    # 1) 저속 정차 접근 구간(10km/h 이하):
+    #    정지선이 전방에 있고(model_x < 35.0m) 10초 후 속도가 과도하지 않으면(model_v < 12.0) 정지 상태 유지.
+    #    (저속에서 10초 뒤 개방 도로를 예측하여 model_v가 일시적으로 3~5m/s가 되더라도 정차 완료 전 섣부른 정지 해제 방지)
+    if v_ego_kph < 10.0:
+      stopSign = model_x < 35.0 and model_v < 12.0
     elif v_ego_kph < 82.0:
       stopSign = (model_x < d_rel - 3.0 and
                   model_x < np.interp(v[0] * 3.6, [60, 80], [120.0, 150]) and
@@ -364,36 +376,24 @@ class CarrotPlanner:
     else:
       stopSign = False
 
-    # self.stopSignCount = (
-    #   self.stopSignCount + 1
-    #   if (
-    #     stopSign
-    #     and (
-    #       model_x > get_safe_obstacle_distance(
-    #         v_ego,
-    #         t_follow=0,
-    #         comfort_brake=COMFORT_BRAKE,
-    #         stop_distance=-1.0,
-    #       )
-    #     )
-    #   )
-    #   else 0
-    # )
     self.stopSignCount = self.stopSignCount + 1 if stopSign else 0
     self.startSignCount = self.startSignCount + 1 if startSign and not stopSign else 0
 
     if self.stopSignCount * DT_MDL > 0.0:
       self.trafficState = TrafficState.red
-    elif self.startSignCount * DT_MDL > 0.2:
+    elif self.trafficLightDetectMode == 2 and self.startSignCount * DT_MDL > 0.6:
       self.trafficState = TrafficState.green
     else:
-      self.trafficState = TrafficState.off
+      if self.trafficLightDetectMode == 1 and self.xState in (XState.e2eStop, XState.e2eStopped):
+        self.trafficState = TrafficState.red
+      else:
+        self.trafficState = TrafficState.off
 
   def _update_carrot_man(self, sm, v_ego_kph, v_cruise_kph):
     atc_active = False
     carrot_man = get_carrot_man(sm)
     if carrot_man is not None:
-      traffic_state = 0 if self.signal_detection_suspended else carrot_man.trafficState
+      traffic_state = 0 if getattr(self, 'signal_detection_suspended', False) else carrot_man.trafficState
       atc_turn_left = carrot_man.atcType in ["turn left", "atc left"]
       trigger_start = self.carrot_stay_stop = False
       if atc_turn_left or sm['carState'].leftBlinker:
@@ -411,8 +411,9 @@ class CarrotPlanner:
         if self.soft_hold_active > 0:
           self.add_signal_event(EventName.trafficSignChanged)
         elif self.xState in [XState.e2eStop, XState.e2eStopped]:
-          self.xState = XState.e2eCruise
-          self.traffic_starting_count = 10.0 / DT_MDL
+          if getattr(self, 'trafficLightDetectMode', 0) == 2:
+            self.xState = XState.e2eCruise
+            self.traffic_starting_count = 10.0 / DT_MDL
 
       self.activeCarrot = carrot_man.activeCarrot
       self.xDistToTurn = carrot_man.xDistToTurn
@@ -677,7 +678,7 @@ class CarrotPlanner:
       elif lead_in_stop_range:
         self.xState = XState.lead
       elif self.stopping_count == 0:
-        if self.trafficState == TrafficState.green and not self.carrot_stay_stop and not carstate.leftBlinker and self.trafficLightDetectMode != 1:
+        if self.trafficState == TrafficState.green and not self.carrot_stay_stop and not carstate.leftBlinker and self.trafficLightDetectMode == 2:
           #self.xState = XState.e2ePrepare
           self.xState = XState.e2eCruise  # 실험모드를 거치지 않고 바로 출발.
           self.add_signal_event(EventName.trafficSignGreen)
@@ -692,7 +693,7 @@ class CarrotPlanner:
       elif lead_in_stop_range:
         self.xState = XState.lead
       else:
-        if self.trafficState == TrafficState.green:
+        if self.trafficState == TrafficState.green and self.trafficLightDetectMode == 2:
           self.add_signal_event(EventName.trafficSignGreen)
           self.xState = XState.e2eCruise
         else:
@@ -705,7 +706,7 @@ class CarrotPlanner:
             self.actual_stop_distance = stop_dist
           stop_model_x = 0
           self.fakeCruiseDistance = 0 if self.actual_stop_distance > 10.0 else 10.0
-          if v_ego < 0.3:
+          if v_ego < 0.35 or getattr(carstate, 'standstill', False):
             self.stopping_count = 0.5 / DT_MDL
             self.xState = XState.e2eStopped
     elif self.xState == XState.e2ePrepare:

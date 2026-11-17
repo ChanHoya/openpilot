@@ -66,7 +66,7 @@ def control_fixture():
               get_bool=lambda k: bool(settings.get(k, False)))
   control = NS(CP=cp, CI=ci, sm=sm, params=params, VM=VehicleModel(cp), LaC=LatControlTorque(cp, ci),
                LoC=NS(reset=lambda: None, update=lambda *args: (0.0, 0.0, 0.0), long_control_state='off'),
-               carrot_controls=NS(lat_suspend_control=lambda cs, active: active), is_vw_meb=False,
+               carrot_controls=NS(lat_suspend_control=lambda cs, active, *args: active), is_vw_meb=False,
                desired_curvature=0.0, lateral_startup=LateralStartupGate(), lateral_started=False,
                steer_limited_by_safety=False)
   return control, lambda: ns['state_control'](control)

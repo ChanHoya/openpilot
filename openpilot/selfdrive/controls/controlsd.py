@@ -158,7 +158,7 @@ class Controls:
     CC.latActive = lateral_control_allowed(self.sm['selfdriveState'].active, lateral_enabled, CS.latEnabled,
                                            CS.steerFaultTemporary, CS.steerFaultPermanent, below_min_speed,
                                            CS.standstill, steer_at_standstill)
-    CC.latActive = self.carrot_controls.lat_suspend_control(CS, CC.latActive)
+    CC.latActive = self.carrot_controls.lat_suspend_control(CS, CC.latActive, model_v2)
     # Wait only for the first readiness confirmation, including AlwaysLateral.
     CC.latActive = CC.latActive and lateral_ready
     CC.longActive = CC.enabled and not any(e.overrideLongitudinal for e in self.sm['onroadEvents']) and self.CP.openpilotLongitudinalControl

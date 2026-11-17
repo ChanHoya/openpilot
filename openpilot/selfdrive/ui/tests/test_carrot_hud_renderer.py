@@ -60,6 +60,16 @@ def hud_module(monkeypatch):
     def render(self, rect):
       pass
 
+  class FakeCameraSCCButton:
+    def __init__(self, *args):
+      self.is_pressed = False
+
+    def update_state(self):
+      pass
+
+    def render(self, rect):
+      pass
+
   class Widget:
     def __init__(self):
       pass
@@ -70,6 +80,7 @@ def hud_module(monkeypatch):
     started_frame=0,
     status=0,
     is_metric=True,
+    CP=None,
     usbgpu_present=False,
     usbgpu_compiled=False,
     usbgpu_compile_pending=False,
@@ -88,6 +99,7 @@ def hud_module(monkeypatch):
       CV=SimpleNamespace(MS_TO_KPH=3.6, MS_TO_MPH=2.2369362920544),
     ),
     "openpilot.selfdrive.ui.onroad.exp_button": SimpleNamespace(ExpButton=FakeExpButton),
+    "openpilot.selfdrive.ui.onroad.camera_scc_button": SimpleNamespace(CameraSCCButton=FakeCameraSCCButton),
     "openpilot.system.hardware.usbgpu": SimpleNamespace(
       usbgpu_badge_state=lambda compiled, loading, active, failed, compile_pending=False: (
         "error" if failed else "loading" if loading else "compile_pending" if compile_pending
@@ -604,6 +616,7 @@ def test_render_keeps_sampling_and_interactions_live(hud_module, monkeypatch, re
   calls = []
 
   renderer._exp_button = SimpleNamespace(render=lambda rect: calls.append("button"))
+  renderer._camera_scc_button = SimpleNamespace(render=lambda rect: calls.append("camera_scc"))
   renderer._plot_renderer = SimpleNamespace(
     update=lambda mode: calls.append(("sample", mode)),
     paint=lambda rect, font: calls.append("plot"),
@@ -624,7 +637,7 @@ def test_render_keeps_sampling_and_interactions_live(hud_module, monkeypatch, re
     "date",
     "tpms",
     "egpu",
-  ]) + ["button", "animation"]
+  ]) + ["button", "camera_scc", "animation"]
 
 
 def test_vehicle_navigation_profile_does_not_force_speed_with_cruise_off(hud_module):

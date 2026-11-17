@@ -153,6 +153,7 @@ def font_fallback(font: rl.Font, text: str | bytes | None = None) -> rl.Font:
   return font
 
 
+
 class MousePos(NamedTuple):
   x: float
   y: float
@@ -1045,11 +1046,16 @@ class GuiApplication:
     # Match the common symbols in the generated atlases (fonts/process.py).
     codepoints.update(map(ord, "–‑✓×°§•X⚙✕◀▶✔⌫⇧␣○●↳çêüñ–‑✓×°§•€£¥"))
     if font_weight in (FontWeight.DISPLAY, FontWeight.UNIFONT):
+      # Korean syllables, jamo, compatibility jamo
       codepoints.update(range(0xAC00, 0xD7A4))
       codepoints.update(range(0x1100, 0x1200))
       codepoints.update(range(0x3130, 0x3190))
+      # CJK
       codepoints.update(range(0x4E00, 0xA000))
       codepoints.update(range(0x3400, 0x4DC0))
+      # Extra symbols
+      extra_symbols = "–‑✓×°§•X⚙✕◀▶✔⌫⇧␣○●↳çêüñ–‑✓×°§•€£¥🛑⚠️"
+      codepoints.update(ord(c) for c in extra_symbols)
     return sorted(codepoints)
 
   @staticmethod

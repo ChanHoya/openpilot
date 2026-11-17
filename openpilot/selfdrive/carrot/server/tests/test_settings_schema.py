@@ -754,3 +754,49 @@ def test_declared_nonzero_min_and_zero_labels_are_well_formed(params):
       assert item['min'] == item['default'] == 0
       assert 0 < item['nonzero_min'] <= item['max']
       assert set(item['zero_label']) == {'ko', 'en', 'zh'}
+
+
+def test_curve_inner_bias_is_registered_in_steer_feel_section(settings, params):
+  by_name = {p["name"]: p for p in params}
+  assert "CurveInnerBias" in by_name
+  bias = by_name["CurveInnerBias"]
+  assert (bias["min"], bias["max"], bias["default"], bias["unit"]) == (0, 100, 10, 5)
+  assert bias["display_unit"] == "percent"
+  assert set(bias["zero_label"]) == {"ko", "en", "zh"}
+  assert '{"CurveInnerBias", {PERSISTENT, INT, "10"}}' in PARAMS_KEYS_PATH.read_text(encoding="utf-8")
+
+  categories = build_menu_categories(settings, by_name)
+  steer_feel = next(
+    section
+    for category in categories
+    for group in category["groups"]
+    for section in group["sections"]
+    if section["id"] == "STEER_FEEL"
+  )
+  items = steer_feel["items"]
+  assert "CurveInnerBias" in items
+  assert items.index("CenterToFrontRatio") == items.index("SteerActuatorDelay") + 1
+  assert items.index("CurveInnerBias") == items.index("LatSmoothSec") + 1
+
+
+def test_laneless_center_adjust_is_registered_in_steer_feel_section(settings, params):
+  by_name = {p["name"]: p for p in params}
+  assert "LanelessCenterAdjust" in by_name
+  adj = by_name["LanelessCenterAdjust"]
+  assert (adj["min"], adj["max"], adj["default"], adj["unit"]) == (0, 30, 10, 5)
+  assert adj["display_unit"] == "percent"
+  assert set(adj["zero_label"]) == {"ko", "en", "zh"}
+  assert '{"LanelessCenterAdjust", {PERSISTENT, INT, "10"}}' in PARAMS_KEYS_PATH.read_text(encoding="utf-8")
+
+  categories = build_menu_categories(settings, by_name)
+  steer_feel = next(
+    section
+    for category in categories
+    for group in category["groups"]
+    for section in group["sections"]
+    if section["id"] == "STEER_FEEL"
+  )
+  items = steer_feel["items"]
+  assert "LanelessCenterAdjust" in items
+  assert items.index("LanelessCenterAdjust") == items.index("CurveInnerBias") + 1
+

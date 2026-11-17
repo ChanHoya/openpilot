@@ -157,6 +157,8 @@
                 "SteerActuatorDelay",
                 "CenterToFrontRatio",
                 "LatSmoothSec",
+                "CurveInnerBias",
+                "LanelessCenterAdjust",
                 "LatSuspendAngleDeg",
                 "CustomSR",
                 "SteerRatioRate"
@@ -179,6 +181,7 @@
                 "ModelPathIndicator",
                 "BlinkerLatchedTurn",
                 "LaneChangeLeverWait",
+                "AutoLaneChangeSmooth",
                 "AutoTurnControl",
                 "AutoTurnControlRightLaneChange",
                 "AutoTurnControlSpeedTurn",
@@ -1067,6 +1070,50 @@
       "max": 30,
       "default": 13,
       "unit": 1
+    },
+    {
+      "group": "조향튜닝",
+      "name": "CurveInnerBias",
+      "title": "코너 안쪽 유도 강도",
+      "descr": "급커브 진입 시 차선 바깥쪽으로 밀렸다가 뒤늦게 안쪽으로 파고드는 현상을 줄이기 위해 코너 초입부터 안쪽 차선 방향으로 선제 유도합니다.\n0=끄기(순정 모델 궤적), 10=권장 기본값, 높을수록 코너 안쪽 유도 및 바깥쪽 밀림 억제가 강해집니다.\n과도하면 고속 S자 커브 등에서 안쪽 차선에 너무 붙을 수 있으니 5~15 범위에서 조절하세요.",
+      "egroup": "LAT",
+      "etitle": "Corner Inner-Lane Bias",
+      "edescr": "Guides the vehicle toward the inside of the lane from corner entry to prevent drifting to the outside of a sharp curve and cutting in late.\n0=Off (stock model path), 10=Recommended default. Higher values increase inner-lane guidance and outer-drift suppression.\nAdjust within 5–15 if the car hugs the inside line too closely on high-speed S-curves.",
+      "cgroup": "转向",
+      "ctitle": "弯道内侧引导强度",
+      "cdescr": "在急弯入弯时提前向车道内侧引导，抑制先向外侧漂移再向内侧猛切的现象。\n0=关闭（原厂模型轨迹），10=推荐默认值，数值越大内侧引导与外侧防漂移越强。\n过高可能在高速S弯过于贴近弯道内侧线，请在5~15范围内微调。",
+      "min": 0,
+      "max": 100,
+      "default": 10,
+      "unit": 5,
+      "display_unit": "percent",
+      "zero_label": {
+        "ko": "0 · 끄기",
+        "en": "0 · Off",
+        "zh": "0 · 关闭"
+      }
+    },
+    {
+      "group": "조향튜닝",
+      "name": "LanelessCenterAdjust",
+      "title": "Laneless 중앙 유지 보정(10%)",
+      "descr": "직선 및 완만한 도로에서 차선 인식이 양호할 때 좌우 여백을 기준으로 중앙을 벗어나면 부드럽게 복귀시킵니다.\n0=끄기(순정 모델 궤적), 10=권장 기본값, 높을수록 복귀 조향이 강해집니다.\n차선변경 중이거나 급커브에서는 자동으로 보정이 비활성화됩니다.",
+      "egroup": "LAT",
+      "etitle": "Laneless Center Adjust(10%)",
+      "edescr": "Gently restores lane centering in Laneless mode when the vehicle drifts outside the deadzone on straight or mild roads based on lane margins.\n0=Off (stock model path), 10=Recommended default. Higher values increase restorative steering.\nAutomatically disabled during lane changes or sharp curves.",
+      "cgroup": "转向",
+      "ctitle": "无车道线模式居中校正(10%)",
+      "cdescr": "在直线及缓和道路上车道线清晰时，根据左右间隙在偏离中心时平滑纠正回中央。\n0=关闭（原厂模型轨迹），10=推荐默认值，数值越大纠偏力度越强。\n变道中或急弯路段会自动暂停校正。",
+      "min": 0,
+      "max": 30,
+      "default": 10,
+      "unit": 5,
+      "display_unit": "percent",
+      "zero_label": {
+        "ko": "0 · 끄기",
+        "en": "0 · Off",
+        "zh": "0 · 关闭"
+      }
     },
     {
       "group": "조향튜닝",
@@ -2769,6 +2816,22 @@
       "default": 0,
       "unit": 1,
       "control": "toggle"
+    },
+    {
+      "group": "조향일반",
+      "name": "AutoLaneChangeSmooth",
+      "title": "자동 차선변경 부드러운 전환x0.1s(10)",
+      "descr": "자동 차선변경 시작 및 완료시 토크 급변을 방지하고 부드러운 S-커브로 점진 전환합니다. (0: 끔, 10: 1.0초 전환)",
+      "egroup": "LAT",
+      "etitle": "Auto LaneChange Smoothx0.1s(10)",
+      "edescr": "Smoothly ramps steering torque and curvature using an S-curve during auto lane change start and completion (0: Off, 10: 1.0s transition)",
+      "cgroup": "转向",
+      "ctitle": "自动变道平滑过渡 x0.1s(10)",
+      "cdescr": "自动变道开始与结束时使用S曲线平滑过渡，防止转向扭矩突变 (0: 关闭, 10: 1.0秒过渡)",
+      "min": 0,
+      "max": 20,
+      "default": 10,
+      "unit": 1
     },
     {
       "group": "조향일반",

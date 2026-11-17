@@ -211,6 +211,10 @@ class LatControlTorque(LatControl):
         desired_lateral_jerk = (np.interp(self.desired_lat_jerk_time, ModelConstants.T_IDXS, model_data.acceleration.y) - desired_lateral_accel) / self.desired_lat_jerk_time
         lookahead_lateral_jerk = get_lookahead_value(predicted_lateral_jerk[LAT_PLAN_MIN_IDX:friction_upper_idx], desired_lateral_jerk)
 
+        lane_change_ramp = getattr(self, "lane_change_ramp", 1.0)
+        if lane_change_ramp < 1.0:
+          lookahead_lateral_jerk *= lane_change_ramp
+
         if self.use_steering_angle or lookahead_lateral_jerk == 0.0:
           lookahead_lateral_jerk = 0.0
           actual_lateral_jerk = 0.0
@@ -235,6 +239,11 @@ class LatControlTorque(LatControl):
         future_rolls = [roll_pitch_adjust(np.interp(t, ModelConstants.T_IDXS, model_data.orientation.x) + roll, np.interp(t, ModelConstants.T_IDXS, model_data.orientation.y) + pitch) for t in adjusted_future_times]
         past_lateral_accels_desired = [self.lateral_accel_desired_deque[min(len(self.lateral_accel_desired_deque)-1, i)] for i in self.history_frame_offsets]
         future_planned_lateral_accels = [np.interp(t, ModelConstants.T_IDXS, model_data.acceleration.y) for t in adjusted_future_times]
+        if lane_change_ramp < 1.0:
+          future_planned_lateral_accels = [
+            desired_lateral_accel + lane_change_ramp * (acc - desired_lateral_accel)
+            for acc in future_planned_lateral_accels
+          ]
 
         # compute NNFF error response
         nnff_setpoint_input = [CS.vEgo, setpoint, lateral_jerk_setpoint, roll] \

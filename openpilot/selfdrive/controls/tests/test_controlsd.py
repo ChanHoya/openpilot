@@ -28,7 +28,7 @@ def run_lateral_gate(*, brand="tesla", supported=True, speed=0.0, stopped=True, 
   controls.params = SimpleNamespace(get_float=lambda _key: 0.0, get_bool=lambda _key: always_lateral)
   controls.is_vw_meb = False
   controls.lateral_startup = SimpleNamespace(ready=True, update=lambda *_args: True)
-  controls.VM = SimpleNamespace(update_params=lambda *_args: None, calc_curvature=lambda *_args: 0.0)
+  controls.VM = SimpleNamespace(update_params=lambda *_args: None, update_geometry=lambda *_args: None, calc_curvature=lambda *_args: 0.0)
   state = car.CarState.new_message(vEgo=speed, standstill=stopped, gearShifter=gear, latEnabled=lat_enabled,
                                    steerFaultTemporary=temporary_fault, steerFaultPermanent=permanent_fault)
   controls.sm = {
@@ -43,7 +43,7 @@ def run_lateral_gate(*, brand="tesla", supported=True, speed=0.0, stopped=True, 
 
   result = []
 
-  def capture(_state, lat_active):
+  def capture(_state, lat_active, *_args):
     result.append(lat_active)
     raise ReachedLateralGate
 
@@ -88,3 +88,25 @@ def test_standstill_preserves_engagement_fault_and_gear_gates(override):
 @pytest.mark.parametrize("brand", ["tesla", "ford", "volkswagen", "psa", "hyundai"])
 def test_lateral_control_remains_available_above_minimum_speed(brand):
   assert run_lateral_gate(brand=brand, speed=5.1, min_speed=5.0, stopped=False)
+
+
+def test_controlsd_smooth_lane_change_with_cereal_model_v2():
+  from openpilot.cereal import log
+  from openpilot.selfdrive.carrot.carrot_controls import CarrotControls
+
+  carrot_ctrl = CarrotControls(None)
+  carrot_ctrl.params = SimpleNamespace(get_int=lambda _key: 10)
+  carrot_ctrl.update_params()
+
+  # Construct real capnp modelV2 message
+  msg = log.ModelDataV2.new_message()
+  msg.meta.laneChangeState = log.LaneChangeState.laneChangeStarting
+  msg.meta.laneChangeDirection = log.LaneChangeDirection.left
+  msg.action.desiredCurvature = -0.002
+  reader = msg.as_reader()
+
+  cs = SimpleNamespace(steeringPressed=False, steeringTorque=0.0, vEgo=20.0, leftBlinker=False, rightBlinker=False)
+  target_curv, ramp, jerk = carrot_ctrl.smooth_lane_change(cs, reader, -0.002, 0.0)
+  assert ramp == pytest.approx(0.0, abs=1e-3)
+  assert jerk == 1.5
+

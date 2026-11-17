@@ -174,6 +174,8 @@ class Controls:
 
     if not CC.latActive:
       self.LaC.reset()
+      if hasattr(self.carrot_controls, "reset_lane_change"):
+        self.carrot_controls.reset_lane_change()
     if CC.latActive and not self.lateral_started:
       self.desired_curvature = self.curvature
       self.lateral_started = True
@@ -203,6 +205,16 @@ class Controls:
       alpha = 1 - np.exp(-DT_CTRL / tau) if tau > 0 else 1
       return alpha * val + (1 - alpha) * prev_val
 
+    if hasattr(self.carrot_controls, "smooth_lane_change"):
+      target_curvature, lc_ramp, max_lat_jerk = self.carrot_controls.smooth_lane_change(
+        CS, model_v2, model_v2.action.desiredCurvature, self.desired_curvature
+      )
+    else:
+      target_curvature, lc_ramp, max_lat_jerk = model_v2.action.desiredCurvature, 1.0, 5.0
+
+    if hasattr(self.LaC, "lane_change_ramp"):
+      self.LaC.lane_change_ramp = lc_ramp
+
     if not CC.latActive:
       new_desired_curvature = self.curvature
     elif self.is_vw_meb:
@@ -214,7 +226,7 @@ class Controls:
                                                steer_actuator_delay + lat_smooth_seconds, lat_plan.distances)
         new_desired_curvature = smooth_value(curvature, self.desired_curvature, lat_smooth_seconds)
       else:
-        new_desired_curvature = float(model_v2.action.desiredCurvature)  # raw 모델곡률 (if2 기본과 동일)
+        new_desired_curvature = smooth_value(target_curvature, self.desired_curvature, 0.1)  # raw 모델곡률 (if2 기본과 동일)
     elif self.lanefull_mode_enabled:
       if len(lat_plan.curvatures) == 0:
         new_desired_curvature = self.curvature
@@ -222,9 +234,11 @@ class Controls:
         curvature = get_lag_adjusted_curvature(self.CP, CS.vEgo, lat_plan.psis, lat_plan.curvatures, steer_actuator_delay + lat_smooth_seconds, lat_plan.distances)
         new_desired_curvature = smooth_value(curvature, self.desired_curvature, lat_smooth_seconds)
     else:      
-      new_desired_curvature = smooth_value(model_v2.action.desiredCurvature, self.desired_curvature, 0.1)
+      new_desired_curvature = smooth_value(target_curvature, self.desired_curvature, 0.1)
 
-    self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll)
+    self.desired_curvature, curvature_limited = clip_curvature(
+      CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll, max_lateral_jerk=max_lat_jerk
+    )
 
     actuators.curvature = float(self.desired_curvature)
 

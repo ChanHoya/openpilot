@@ -299,6 +299,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"CenterToFrontRatioEnabled", {PERSISTENT, BOOL}},  // Retired: migration only
     {"CenterToFrontRatio", {PERSISTENT, INT, "0"}},
     {"LatSmoothSec", {PERSISTENT, INT, "13"}},
+    {"CurveInnerBias", {PERSISTENT, INT, "10"}},
     {"LatSuspendAngleDeg", {PERSISTENT, INT, "300"}},
     {"CruiseOnDist", {PERSISTENT, INT, "400"}},
 
@@ -370,6 +371,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"AutoBlinkerControl", {PERSISTENT, INT, "0"}},
     {"BlinkerLatchedTurn", {PERSISTENT, INT, "0"}},
     {"LaneChangeLeverWait", {PERSISTENT, BOOL, "0"}},
+    {"AutoLaneChangeSmooth", {PERSISTENT, INT, "10"}},
+    {"LanelessCenterAdjust", {PERSISTENT, INT, "10"}},
     {"MaxAngleFrames", {PERSISTENT, INT, "89"}},
 
     {"LatMpcPathCost", {PERSISTENT, INT, "200"}},

@@ -55,6 +55,14 @@ class RadarStateOverride:
       return self._radar_state
     return self._sm[service]
 
+  def __contains__(self, service: Any) -> bool:
+    if service == "radarState":
+      return True
+    try:
+      return service in self._sm
+    except Exception:
+      return False
+
   def __getattr__(self, name: str) -> Any:
     return getattr(self._sm, name)
 

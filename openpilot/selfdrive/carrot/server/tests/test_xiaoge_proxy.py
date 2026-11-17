@@ -3,9 +3,12 @@ from contextlib import asynccontextmanager
 import importlib.util
 from pathlib import Path
 
+import pytest
 from aiohttp import ClientSession, ClientTimeout, web
 from aiohttp.test_utils import TestClient, TestServer
 
+
+pytestmark = pytest.mark.filterwarnings("ignore:.*AppKey.*:aiohttp.web_exceptions.NotAppKeyWarning")
 
 # This feature has no device dependencies. Test its real HTTP routes without
 # starting the application's camera, messaging, or background service workers.

@@ -71,7 +71,7 @@ def only_offroad(started: bool, params: Params, CP: car.CarParams) -> bool:
   return not started
 
 def enable_updated(started: bool, params: Params, CP: car.CarParams) -> bool:
-  return not started and params.get_bool("SoftwareMenu")
+  return params.get_bool("SoftwareMenu")
 
 def or_(*fns):
   return lambda *args: any(fn(*args) for fn in fns)

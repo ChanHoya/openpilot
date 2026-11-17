@@ -13,7 +13,7 @@ from openpilot.common.rebuild_request import request_full_rebuild
 from openpilot.selfdrive.carrot.server.services.git_config import prepare_git_pull
 
 
-BUSY_STATES = ('updating', 'cleaning', 'rebooting', 'rebuild_rebooting')
+BUSY_STATES = ('updating', 'cleaning', 'rolling_back', 'rebooting', 'rebuild_rebooting', 'rollback_rebooting')
 
 
 def read_startup_error(log_path: Path | None) -> str:
@@ -79,6 +79,22 @@ def pull_current_branch(repo: Path) -> tuple[str, bool]:
   return target, target != before
 
 
+def rollback_current_branch(repo: Path) -> str:
+  def git(*args):
+    result = subprocess.run(['git', *args], cwd=repo, capture_output=True, text=True,
+                            encoding='utf-8', errors='replace', timeout=180, **child_lock_kwargs())
+    if result.returncode:
+      raise RuntimeError(result.stderr.strip() or result.stdout.strip() or 'Git failed')
+    return result.stdout.strip()
+
+  recover_stale_index_lock(str(repo))
+  parent = git('rev-parse', 'HEAD~1')
+  if not parent:
+    raise RuntimeError('No previous commit found to roll back.')
+  git('reset', '--hard', 'HEAD~1')
+  return parent
+
+
 class RecoveryUpdate:
   def __init__(self, repo: Path, reboot=reboot_device):
     self.repo = repo
@@ -112,6 +128,14 @@ class RecoveryUpdate:
     threading.Thread(target=self._rebuild, name='startup-recovery-rebuild', daemon=True).start()
     return True
 
+  def start_rollback(self):
+    with self._lock:
+      if self._state[0] in BUSY_STATES:
+        return False
+      self._state = ('rolling_back', '')
+    threading.Thread(target=self._rollback, name='startup-recovery-rollback', daemon=True).start()
+    return True
+
   def _rebuild(self):
     try:
       # Defer cleanup to the launcher: a broken build environment can prevent
@@ -123,6 +147,17 @@ class RecoveryUpdate:
         self.reboot()
     except Exception as exc:
       print(f'Startup recovery rebuild failed: {exc}', flush=True)
+      self._set('failed', str(exc)[-2000:])
+
+  def _rollback(self):
+    try:
+      with repo_lock():
+        target = rollback_current_branch(self.repo)
+        request_full_rebuild()
+        self._set('rollback_rebooting', target[:10])
+        self.reboot()
+    except Exception as exc:
+      print(f'Startup recovery rollback failed: {exc}', flush=True)
       self._set('failed', str(exc)[-2000:])
 
   def _run(self, automatic=False):

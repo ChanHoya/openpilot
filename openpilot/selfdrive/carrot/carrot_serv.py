@@ -456,8 +456,13 @@ class CarrotServ:
   def _speed_countdown_distance(self, CS):
     distances = []
     legacy_bump_suppressed = self.xSpdType == 22 and self.autoNaviCountDownMode == 1
-    if self.external_navigation_active and self.xSpdDist > 0 and not legacy_bump_suppressed:
-      distances.append(self.xSpdDist)
+    if self.external_navigation_active:
+      if self.xSpdDist > 0 and not legacy_bump_suppressed:
+        distances.append(self.xSpdDist)
+      plus_type = getattr(self, "nSdiPlusType", -1)
+      plus_dist = getattr(self, "nSdiPlusDist", 0)
+      if plus_type == 22 and plus_dist > 0 and self.autoNaviCountDownMode >= 2:
+        distances.append(plus_dist)
 
     vehicle_navi_active = (not self.external_navigation_active and CS is not None and self.vehicleNaviCanControl and
                            getattr(CS, "vehicleNaviActive", False))
@@ -1106,6 +1111,9 @@ class CarrotServ:
       or navi.guidance_active or navi.route.present
     )
 
+    if navi.road_category is not None:
+      self.roadcate = navi.road_category
+
     if new_session or off_route_changed or navi.speed.sequence != self.carrot_navi_speed_sequence:
       self.carrot_navi_speed_sequence = navi.speed.sequence
       self._apply_carrot_navi_speed(navi)
@@ -1116,8 +1124,6 @@ class CarrotServ:
     if new_session or navi.route.sequence != self.carrot_navi_route_sequence:
       self._apply_carrot_navi_route(navi)
 
-    if navi.road_category is not None:
-      self.roadcate = navi.road_category
     self._apply_carrot_navi_guidance(navi, force=new_session or off_route_changed)
     if self.carrot_navi_has_control:
       self.active_count = 80
@@ -1248,7 +1254,7 @@ class CarrotServ:
     atc_desired = 250
     if atc_speed > 0 and x_dist_to_turn > 0:
       decel = self.autoNaviSpeedDecelRate
-      safe_sec = 2.0
+      safe_sec = 3.5
       atc_desired = min(atc_desired, self.calculate_current_speed(x_dist_to_turn - atc_dist, atc_speed, safe_sec, decel))
 
 
@@ -1335,6 +1341,8 @@ class CarrotServ:
     self.bearing = self._update_gps(v_ego, sm, gps_service)
 
     self.xSpdDist = max(self.xSpdDist - delta_dist, -1000)
+    if getattr(self, "nSdiPlusDist", 0) > 0:
+      self.nSdiPlusDist = max(self.nSdiPlusDist - delta_dist, 0)
     self.xDistToTurn = self.xDistToTurn - delta_dist
     self.xDistToTurnNext = self.xDistToTurnNext - delta_dist
     self.active_count = max(self.active_count - 1, 0)
@@ -1395,7 +1403,7 @@ class CarrotServ:
                          self.active_carrot > 0 and
                          (self.xSpdType != 22 or self._speed_bump_control_active(self.xSpdDist)))
     if legacy_sdi_active:
-      safe_sec = self.autoNaviSpeedBumpTime if self.xSpdType == 22 else self.autoNaviSpeedCtrlEnd
+      safe_sec = max(3.0, self.autoNaviSpeedBumpTime) if self.xSpdType == 22 else self.autoNaviSpeedCtrlEnd
       decel = self.autoNaviSpeedDecelRate
       sdi_speed = min(sdi_speed, self.calculate_current_speed(self.xSpdDist, self.xSpdLimit, safe_sec, decel))
       self.active_carrot = 5 if self.xSpdType == 22 else 3
@@ -1412,9 +1420,28 @@ class CarrotServ:
     if vehicle_bump_active:
       vehicle_bump_speed = self.calculate_current_speed(CS.speedBumpDistance,
                                                         self.autoNaviSpeedBumpSpeed,
-                                                        self.autoNaviSpeedBumpTime,
+                                                        max(3.0, self.autoNaviSpeedBumpTime),
                                                         self.autoNaviSpeedDecelRate)
       self.active_carrot = 5
+
+    sdi_bump_speed = 250
+    sdi_bump_dist = 0
+    plus_type = getattr(self, "nSdiPlusType", -1)
+    plus_dist = getattr(self, "nSdiPlusDist", 0)
+    if (self.external_navigation_active and self.autoNaviSpeedCtrlMode >= 2 and
+        self.roadcate > 1 and self.active_carrot > 0):
+      if plus_type == 22 and plus_dist > 0:
+        sdi_bump_dist = plus_dist
+      elif self.xSpdType == 22 and self.xSpdDist > 0:
+        sdi_bump_dist = self.xSpdDist
+      elif self.nSdiType == 22 and self.nSdiDist > 0:
+        sdi_bump_dist = self.nSdiDist
+
+      if sdi_bump_dist > 0 and self._speed_bump_control_active(sdi_bump_dist):
+        sdi_bump_speed = self.calculate_current_speed(sdi_bump_dist,
+                                                      self.autoNaviSpeedBumpSpeed,
+                                                      max(3.0, self.autoNaviSpeedBumpTime),
+                                                      self.autoNaviSpeedDecelRate)
 
     if CS is not None:
       vehicle_school_zone_speed = self._vehicle_school_zone_speed(CS)
@@ -1463,6 +1490,7 @@ class CarrotServ:
       (atc_desired, "atc"),
       (atc_desired_next, "atc2"),
       (sdi_speed, sdi_source),
+      (sdi_bump_speed, "bump"),
       (vehicle_camera_speed, "hda"),
       (vehicle_bump_speed, "hda_bump"),
       (vehicle_school_zone_speed, "school"),
@@ -1481,6 +1509,8 @@ class CarrotServ:
       #speed_n_sources.append((self.calculate_current_speed(dist, speed * self.mapTurnSpeedFactor, 0, 1.2), "route"))
 
     desired_speed, source = min(speed_n_sources, key=lambda x: x[0])
+    if source in ("bump", "hda_bump"):
+      self.active_carrot = 5
 
     if CS is not None:
       desired_speed, source = self._apply_speed_source_gas_floor(
@@ -1517,9 +1547,17 @@ class CarrotServ:
     msg.carrotMan.activeCarrot = self.active_carrot
     msg.carrotMan.nRoadLimitSpeed = int(self.nRoadLimitSpeed)
     msg.carrotMan.remote = remote_ip
-    msg.carrotMan.xSpdType = int(self.xSpdType)
-    msg.carrotMan.xSpdLimit = int(self.xSpdLimit)
-    msg.carrotMan.xSpdDist = int(self.xSpdDist)
+    spd_type = self.xSpdType
+    spd_limit = self.xSpdLimit
+    spd_dist = self.xSpdDist
+    if source == "bump" and sdi_bump_dist > 0:
+      spd_type = 22
+      spd_limit = int(self.autoNaviSpeedBumpSpeed)
+      spd_dist = sdi_bump_dist
+
+    msg.carrotMan.xSpdType = int(spd_type)
+    msg.carrotMan.xSpdLimit = int(spd_limit)
+    msg.carrotMan.xSpdDist = int(spd_dist)
     msg.carrotMan.xSpdCountDown = int(left_spd_sec)
     msg.carrotMan.xTurnInfo = int(self.xTurnInfo)
     msg.carrotMan.xDistToTurn = int(self.xDistToTurn)
@@ -1551,7 +1589,8 @@ class CarrotServ:
 
     msg.carrotMan.nGoPosDist = self.nGoPosDist
     msg.carrotMan.nGoPosTime = self.nGoPosTime
-    msg.carrotMan.szSdiDescr = self._get_sdi_descr(-1 if self.nSdiType == 0 and self.nSdiDist == 0 else self.nSdiType)
+    sdi_type_for_descr = 22 if source == "bump" else (-1 if self.nSdiType == 0 and self.nSdiDist == 0 else self.nSdiType)
+    msg.carrotMan.szSdiDescr = self._get_sdi_descr(sdi_type_for_descr)
     if rear_camera_holding and source == "cam":
       label = {"ko": "후면단속 속도 유지", "en": "Rear camera speed hold", "zh": "后向测速限速保持"}.get(self.lang, "Rear camera speed hold")
       msg.carrotMan.szSdiDescr = f"{label} {math.ceil(rear_camera_remaining)}m"
@@ -1739,7 +1778,9 @@ class CarrotServ:
       self.nSdiPlusBlockType = _i(json.get("nSdiPlusBlockType"), -1)
       self.nSdiPlusBlockSpeed = _i(json.get("nSdiPlusBlockSpeed"), 0)
       self.nSdiPlusBlockDist = _i(json.get("nSdiPlusBlockDist"), 0)
-      self.roadcate = _i(json.get("roadcate"), 0)
+      roadcate_val = json.get("roadcate")
+      if roadcate_val is not None:
+        self.roadcate = _i(roadcate_val, self.roadcate)
 
       ## GuidePoint
       self.nTBTDist = int(json.get("nTBTDist", 0))

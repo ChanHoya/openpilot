@@ -278,7 +278,18 @@ def parse_carrot_navi_control(data: Any) -> CarrotNaviControl | None:
 
   lane = _get(data, "laneCurrent")
   lane_present, _ = _meta(lane)
-  road_category = _int(lane, "roadCategory") if lane_present else None
+  category_valid = _get(lane, "roadCategoryValid")
+  if category_valid is not None:
+    is_valid_category = bool(category_valid)
+  else:
+    raw_cat = _get(lane, "roadCategory")
+    is_valid_category = type(raw_cat) is int and 0 <= raw_cat <= 12
+
+  road_category = (
+    _int(lane, "roadCategory")
+    if lane_present and is_valid_category
+    else None
+  )
 
   return CarrotNaviControl(
     session_id=_text(data, "sessionId"),

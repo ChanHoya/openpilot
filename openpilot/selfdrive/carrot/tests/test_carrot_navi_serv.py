@@ -461,3 +461,133 @@ def test_curve_selection_ignores_retired_model_speed(monkeypatch, mode, expected
   result = sent['carrotMan'].carrotMan
   assert result.desiredSource == expected_source
   assert result.desiredSpeed == (125 if mode == 1 else expected_speed)
+
+
+def test_speed_bump_omitted_roadcate_does_not_suppress_bump():
+  serv = _serv()
+  serv.autoNaviSpeedCtrlMode = 2
+  serv.autoNaviSpeedBumpSpeed = 30
+  serv.autoNaviSpeedBumpEndDistance = 2.0
+  serv.roadcate = 8
+
+  # Kisa navigation payload without 'roadcate'
+  payload = {
+    "nRoadLimitSpeed": 50,
+    "nSdiType": 22,
+    "nSdiDist": 80,
+    "nSdiSpeedLimit": 0,
+  }
+  serv.update(payload)
+  assert serv.roadcate == 8
+  assert serv.xSpdType == 22
+  assert serv.xSpdLimit == 30
+  assert serv.xSpdDist == 80
+
+
+def test_7714_speed_bump_when_road_category_absent():
+  serv = _serv()
+  serv.autoNaviSpeedCtrlMode = 2
+  serv.autoNaviSpeedBumpSpeed = 30
+  serv.autoNaviSpeedBumpEndDistance = 2.0
+  serv.roadcate = 8
+
+  data = _message()
+  data["speed"] = {
+    "meta": _meta(20),
+    "roadLimitValid": True,
+    "roadLimitKph": 50,
+    "sdiPresent": True,
+    "sdiType": 22,
+    "sdiDistanceM": 75,
+    "sdiSpeedLimitKph": 0,
+  }
+  data["laneCurrent"] = {"meta": _meta(20, present=False)}
+
+  sm = _SubMaster(data)
+  assert serv._update_carrot_navi(sm)
+  assert serv.roadcate == 8
+  assert serv.xSpdType == 22
+  assert serv.xSpdLimit == 30
+  assert serv.xSpdDist == 75
+
+
+def test_simultaneous_camera_and_speed_bump_prioritizes_bump_when_closer(monkeypatch):
+  from openpilot.selfdrive.carrot import carrot_serv
+
+  class Params:
+    def __init__(self, *_args):
+      pass
+
+    def get(self, key):
+      return str({
+        'AutoNaviSpeedCtrlMode': 2,
+        'AutoNaviSpeedBumpSpeed': 30,
+        'AutoNaviSpeedBumpTime': 3,
+        'AutoNaviSpeedBumpEndDistance': 200,
+        'AutoNaviSpeedCtrlEnd': 3,
+        'AutoNaviSpeedDecelRate': 120,
+        'AutoNaviSpeedSafetyFactor': 100,
+        'AutoNaviCountDownMode': 2,
+        'TurnSpeedControlMode': 0,
+        'AutoCurveSpeedLowerLimit': 20,
+        'MapTurnSpeedFactor': 100,
+        'IsMetric': 1,
+        'LanguageSetting': 'main_ko',
+      }.get(key, 0))
+
+    def get_int(self, key):
+      return int(self.get(key))
+
+    def get_float(self, key):
+      return float(self.get(key))
+
+    def get_bool(self, key):
+      return bool(self.get_int(key))
+
+  monkeypatch.setattr(carrot_serv, 'Params', Params)
+  serv = CarrotServ()
+  serv.lang = "ko"
+  serv.roadcate = 8
+  monkeypatch.setattr(serv, '_update_carrot_navi', lambda _sm: True)
+  monkeypatch.setattr(serv, '_update_gps', lambda *_args: 0.)
+  monkeypatch.setattr(serv, 'update_nav_instruction', lambda _sm: None)
+  monkeypatch.setattr(serv, 'update_auto_turn', lambda *_args: (250., 'none', 250., 0.))
+  monkeypatch.setattr(serv, '_vehicle_navigation_display', lambda _cs: (False, 0, False))
+
+  class SubMaster(dict):
+    alive = {'carState': False, 'selfdriveState': False, 'navInstruction': False}
+
+  sm = SubMaster()
+  sent = {}
+  pm = SimpleNamespace(send=lambda name, message: sent.update({name: message}))
+
+  # Simulate external navigation connected with:
+  # Primary SDI = fixed speed camera 400m away, limit 60 km/h
+  # Secondary SDI = speed bump 50m away, bump speed 30 km/h
+  serv.external_navigation_active = True
+  serv.carrot_navi_active = True
+  serv.active_count = 80
+  serv.active_sdi_count = 200
+  serv.nSdiType = 1
+  serv.nSdiSpeedLimit = 60
+  serv.nSdiDist = 400
+  serv.nSdiPlusType = 22
+  serv.nSdiPlusDist = 50
+  serv._update_sdi()
+  assert serv.xSpdType == 1
+  assert serv.xSpdLimit == 60
+  assert serv.xSpdDist == 400
+
+  # Current vehicle speed 60 km/h
+  serv.update_navi('', sm, pm, 60. / 3.6, [], [], 0., 'gpsLocationExternal')
+  result = sent['carrotMan'].carrotMan
+
+  # Desired source should be bump because 50m bump requires lower speed than 400m 60km/h camera
+  assert result.desiredSource == "bump"
+  assert result.desiredSpeed <= 40
+  assert result.xSpdType == 22
+  assert result.xSpdLimit == 30
+  assert result.xSpdDist == 50
+  assert result.szSdiDescr == "과속방지턱"
+  assert result.activeCarrot == 5
+

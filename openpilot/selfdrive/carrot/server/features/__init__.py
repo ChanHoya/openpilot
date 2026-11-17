@@ -26,6 +26,7 @@ from . import (
   system,
   terminal,
   tools,
+  autotune,
   vision_diag,
   vision_test,
   web_sound,
@@ -61,6 +62,7 @@ def register_all(app: web.Application) -> None:
   egpu_model.register(app)
   screenrecord.register(app)
   tools.register(app)
+  autotune.register(app)
   xiaoge.register(app)
   mapbox_tokens.register(app)
   navigation.register(app)

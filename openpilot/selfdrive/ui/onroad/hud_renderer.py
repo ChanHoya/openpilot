@@ -148,6 +148,8 @@ class HudRenderer(Widget):
     super().__init__()
     self._overlay = OverlayLayer(1)
     self._overlay_state = None
+    self._view_3d_mode = False
+    self._is_night = True
     self._display_clock = DisplayClock()
     self._blink_phase = 0.0
     self._cruise_speed_animation_started = 0.0
@@ -170,6 +172,7 @@ class HudRenderer(Widget):
     # traffic light icon들 이름은 실제 프로젝트 리소스 이름에 맞춰 수정 가능
     self._traffic_red_icon = gui_app.texture('images/traffic_red.png')
     self._traffic_green_icon = gui_app.texture('images/traffic_green.png')
+    self._speed_bump_icon = gui_app.texture('images/speed_bump.png')
 
     self._ic_turn_l = gui_app.texture('images/turn_l.png')
     self._ic_turn_r = gui_app.texture('images/turn_r.png')
@@ -213,6 +216,20 @@ class HudRenderer(Widget):
     self._date_time_minute_key: tuple[int, int, int, int, int] | None = None
     self._date_time_text = ""
     self._date_text = ""
+
+  def set_view_3d_theme(self, view_3d_mode: bool, is_night: bool = True) -> None:
+    self._view_3d_mode = view_3d_mode
+    self._is_night = is_night
+
+  set_fsd_theme = set_view_3d_theme
+
+  @property
+  def _fsd_mode(self) -> bool:
+    return self._view_3d_mode
+
+  @_fsd_mode.setter
+  def _fsd_mode(self, val: bool) -> None:
+    self._view_3d_mode = val
 
   def _refresh_hud_params(self, now: float) -> None:
     if now < self._hud_params_next_refresh_time:
@@ -304,6 +321,7 @@ class HudRenderer(Widget):
       scc_x = rect.x + rect.width - UI_CONFIG.border_size - scc_w
       scc_y = rect.y + (rect.height - scc_h) / 2
       self._camera_scc_button.render(rl.Rectangle(scc_x, scc_y, scc_w, scc_h))
+
     self._draw_cruise_speed_animation(rect)
     from openpilot.common.indicator_display import draw as draw_indicator
     badge_width = min(500, rect.width * .62)
@@ -313,13 +331,20 @@ class HudRenderer(Widget):
   def _paint(self, rect: rl.Rectangle) -> None:
 
     # Draw the header background
+    if (getattr(self, '_view_3d_mode', False) or getattr(self, '_fsd_mode', False)) and not getattr(self, '_is_night', True):
+      header_start = rl.Color(255, 255, 255, 120)
+      header_end = rl.Color(255, 255, 255, 0)
+    else:
+      header_start = COLORS.HEADER_GRADIENT_START
+      header_end = COLORS.HEADER_GRADIENT_END
+
     rl.draw_rectangle_gradient_v(
       int(rect.x),
       int(rect.y),
       int(rect.width),
       UI_CONFIG.header_height,
-      COLORS.HEADER_GRADIENT_START,
-      COLORS.HEADER_GRADIENT_END,
+      header_start,
+      header_end,
     )
 
     if self.is_cruise_available:
@@ -628,7 +653,8 @@ class HudRenderer(Widget):
       x_spd_limit = 0
 
     try:
-      x_sign_type = int(cm.xSignType)
+      spd_type = getattr(cm, "xSpdType", None)
+      x_sign_type = int(spd_type if spd_type is not None else cm.xSignType)
     except Exception:
       x_sign_type = 0
 
@@ -655,10 +681,61 @@ class HudRenderer(Widget):
 
     return False
 
+  def _get_speed_bump_distance(self, speed_limit_info: tuple[int, int, int]) -> float:
+    _, x_sign_type, _ = speed_limit_info
+    sm = ui_state.sm
+    bump_offset = 10.0
+    try:
+      if sm.valid.get("carState", False):
+        cs_dist = float(getattr(sm["carState"], "speedBumpDistance", 0.0) or 0.0)
+        adj_dist = cs_dist - bump_offset
+        if 0.5 < adj_dist <= 120.0:
+          return adj_dist
+        if cs_dist > 0.0:
+          return 0.0
+    except Exception:
+      pass
+    if x_sign_type == 22:
+      try:
+        cm = sm["carrotMan"]
+        raw_cm_dist = getattr(cm, "xSpdDist", None)
+        if raw_cm_dist is None:
+          return 1.0
+        cm_dist = float(raw_cm_dist or 0.0)
+        adj_dist = cm_dist - bump_offset
+        if 0.5 < adj_dist <= 120.0:
+          return adj_dist
+        return 0.0
+      except Exception:
+        return 1.0
+    return 0.0
+
+  def _draw_carrot_speed_bump(self, bx: int, by: int, speed_limit_info: tuple[int, int, int]):
+    bump_dist = self._get_speed_bump_distance(speed_limit_info)
+    if bump_dist <= 0.0:
+      return
+    bump_w = 72
+    bump_h = 90
+    x = bx + 415
+    y = by - 35
+    self._draw_texture_rect(self._speed_bump_icon, x - bump_w / 2, y - bump_h / 2, bump_w, bump_h)
+    if bump_dist > 1.0:
+      draw_text_ui_style(
+        f"{int(round(bump_dist))}m",
+        x, y + bump_h / 2 + 26,
+        24, rl.Color(255, 210, 64, 255),
+        font=self._font_bold,
+        border_width=2.0,
+        shadow_offset=2.0,
+        align="center_bottom",
+      )
+
   def _draw_carrot_traffic_light(self, bx: int, by: int):
     from openpilot.selfdrive.ui.signal_status import signal_detection_paused, draw_signal_pause, draw_signal_assist
+    x = bx + 415
+    y = by + 95
     if signal_detection_paused(ui_state.sm):
-      draw_signal_pause(bx, by + 270, 32)
+      draw_signal_pause(x, y, 32)
       return
     traffic_state = self._get_traffic_state()
     traffic_state_carrot = self._get_traffic_state_carrot()
@@ -677,9 +754,6 @@ class HudRenderer(Widget):
       green_light = True
       icon_green = int(icon_green * 1.5)
 
-    x = bx
-    y = by + 270
-
     if red_light:
       self._draw_texture_rect(self._traffic_red_icon, x - icon_red / 2, y - icon_red / 2, icon_red, icon_red)
     elif green_light:
@@ -695,11 +769,18 @@ class HudRenderer(Widget):
     cur_speed_int = 123 if self._debug_speed_panel else int(round(self.speed))
     cur_text = str(cur_speed_int)
 
+    is_light = (getattr(self, '_view_3d_mode', False) or getattr(self, '_fsd_mode', False)) and not getattr(self, '_is_night', True)
+    speed_color = rl.Color(20, 25, 35, 255) if is_light else rl.WHITE
+    border_color = rl.Color(255, 255, 255, 200) if is_light else rl.BLACK
+    shadow_color = rl.Color(255, 255, 255, 120) if is_light else rl.BLACK
+
     draw_text_ui_style(
-      cur_text, bx, by + 50, 120, rl.WHITE,
+      cur_text, bx, by + 50, 120, speed_color,
       font=self._font_display,
       border_width=3.0,
       shadow_offset=8.0,
+      border_color=border_color,
+      shadow_color=shadow_color,
       align="center_bottom",
     )
 
@@ -1064,21 +1145,30 @@ class HudRenderer(Widget):
     x = int(rect.x + 170)
     y = int(rect.y + 120)
 
+    is_light = (getattr(self, '_view_3d_mode', False) or getattr(self, '_fsd_mode', False)) and not getattr(self, '_is_night', True)
+    text_color = rl.Color(28, 34, 46, 255) if is_light else rl.WHITE
+    border_color = rl.Color(255, 255, 255, 180) if is_light else rl.BLACK
+    shadow_color = rl.Color(255, 255, 255, 100) if is_light else rl.BLACK
+
     if show_datetime in (1, 2):
       draw_text_ui_style(
-        self._date_time_text, x, y, 100, rl.WHITE,
+        self._date_time_text, x, y, 100, text_color,
         font=self._font_display,
         border_width=3.0,
         shadow_offset=8.0,
+        border_color=border_color,
+        shadow_color=shadow_color,
         align="center_bottom",
       )
 
     if show_datetime in (1, 3):
       draw_text_ui_style(
-        self._date_text, x, y + 70, 60, rl.WHITE,
+        self._date_text, x, y + 70, 60, text_color,
         font=self._font_display,
         border_width=3.0,
         shadow_offset=8.0,
+        border_color=border_color,
+        shadow_color=shadow_color,
         align="center_bottom",
       )
 
@@ -1129,21 +1219,35 @@ class HudRenderer(Widget):
     self, bx: float, by: float, dw: float,
     fl: float, fr: float, rl_v: float, rr: float,
   ) -> None:
+    is_light = (getattr(self, '_view_3d_mode', False) or getattr(self, '_fsd_mode', False)) and not getattr(self, '_is_night', True)
+    border_color = rl.Color(255, 255, 255, 180) if is_light else rl.BLACK
+    shadow_color = rl.Color(255, 255, 255, 100) if is_light else rl.BLACK
+
+    def _tpms_col(val):
+      c = self._get_tpms_color(val)
+      if is_light and c == COLORS.WHITE_220:
+        return rl.Color(32, 38, 50, 240)
+      return c
+
     draw_text_ui_style(
-      self._get_tpms_text(fl), bx - dw, by - 55, 40, self._get_tpms_color(fl),
-      font=self._font_display, border_width=1.0, shadow_offset=4.0, align='center_bottom',
+      self._get_tpms_text(fl), bx - dw, by - 55, 40, _tpms_col(fl),
+      font=self._font_display, border_width=1.0, shadow_offset=4.0,
+      border_color=border_color, shadow_color=shadow_color, align='center_bottom',
     )
     draw_text_ui_style(
-      self._get_tpms_text(fr), bx + dw, by - 55, 40, self._get_tpms_color(fr),
-      font=self._font_display, border_width=1.0, shadow_offset=4.0, align='center_bottom',
+      self._get_tpms_text(fr), bx + dw, by - 55, 40, _tpms_col(fr),
+      font=self._font_display, border_width=1.0, shadow_offset=4.0,
+      border_color=border_color, shadow_color=shadow_color, align='center_bottom',
     )
     draw_text_ui_style(
-      self._get_tpms_text(rl_v), bx - dw, by + 70, 40, self._get_tpms_color(rl_v),
-      font=self._font_display, border_width=1.0, shadow_offset=4.0, align='center_bottom',
+      self._get_tpms_text(rl_v), bx - dw, by + 70, 40, _tpms_col(rl_v),
+      font=self._font_display, border_width=1.0, shadow_offset=4.0,
+      border_color=border_color, shadow_color=shadow_color, align='center_bottom',
     )
     draw_text_ui_style(
-      self._get_tpms_text(rr), bx + dw, by + 70, 40, self._get_tpms_color(rr),
-      font=self._font_display, border_width=1.0, shadow_offset=4.0, align='center_bottom',
+      self._get_tpms_text(rr), bx + dw, by + 70, 40, _tpms_col(rr),
+      font=self._font_display, border_width=1.0, shadow_offset=4.0,
+      border_color=border_color, shadow_color=shadow_color, align='center_bottom',
     )
 
   def _get_turn_info_hud_data(self) -> dict:
@@ -1409,6 +1513,7 @@ class HudRenderer(Widget):
     speed_limit_info = self._get_speed_limit_info()
     self._draw_carrot_main_background(bx, by, speed_limit_info)
     self._draw_carrot_traffic_light(bx, by)
+    self._draw_carrot_speed_bump(bx, by, speed_limit_info)
     self._draw_carrot_speed_panel(bx, by)
 
     self._draw_carrot_lower_status(bx, by)

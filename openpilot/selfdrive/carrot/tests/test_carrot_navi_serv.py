@@ -591,3 +591,137 @@ def test_simultaneous_camera_and_speed_bump_prioritizes_bump_when_closer(monkeyp
   assert result.szSdiDescr == "과속방지턱"
   assert result.activeCarrot == 5
 
+
+def test_vehicle_hda_bump_publishes_xspd_type_22(monkeypatch):
+  from openpilot.selfdrive.carrot import carrot_serv
+
+  class Params:
+    def __init__(self, *_args):
+      self._values = {
+        "AutoNaviSpeedCtrlMode": 2,
+        "VehicleNaviCanControl": 2,
+        "AutoNaviSpeedBumpSpeed": 30,
+        "AutoNaviSpeedBumpTime": 3,
+        "AutoNaviSpeedBumpEndDistance": 200,
+        "AutoNaviSpeedDecelRate": 120,
+      }
+
+    def get(self, key):
+      return str(self._values.get(key, 0))
+
+    def get_int(self, key):
+      return int(self._values.get(key, 0))
+
+    def get_float(self, key):
+      return float(self._values.get(key, 0.0))
+
+    def get_bool(self, key):
+      return bool(self.get_int(key))
+
+  monkeypatch.setattr(carrot_serv, 'Params', Params)
+  serv = CarrotServ()
+  serv.lang = "ko"
+  serv.external_navigation_active = False
+  monkeypatch.setattr(serv, '_update_carrot_navi', lambda _sm: False)
+  monkeypatch.setattr(serv, '_update_gps', lambda *_args: 0.)
+  monkeypatch.setattr(serv, 'update_nav_instruction', lambda _sm: None)
+  monkeypatch.setattr(serv, 'update_auto_turn', lambda *_args: (250., 'none', 250., 0.))
+
+  class SubMaster(dict):
+    alive = {'carState': True, 'selfdriveState': True, 'navInstruction': False}
+
+  sm = SubMaster({
+    'carState': SimpleNamespace(
+      vEgo=60.0 / 3.6, speedBumpDistance=40.0, vehicleNaviActive=True,
+      speedLimit=0, speedLimitDistance=0, schoolZoneActive=False,
+      vehicleNaviSectionActive=False, vehicleNaviSpeed=0,
+      gasPressed=False, brakePressed=False,
+    ),
+    'selfdriveState': SimpleNamespace(distanceTraveled=0.0),
+  })
+  sent = {}
+  pm = SimpleNamespace(send=lambda name, message: sent.update({name: message}))
+
+  serv.update_navi('', sm, pm, 60.0 / 3.6, [], [], 0., 'gpsLocationExternal')
+  result = sent['carrotMan'].carrotMan
+
+  assert result.desiredSource == "hda_bump"
+  assert result.desiredSpeed <= 45
+  assert result.xSpdType == 22
+  assert result.xSpdLimit == 30
+  assert result.xSpdDist == 40
+  assert result.szSdiDescr in ("과속방지턱", "Speed bump")
+  assert result.activeCarrot == 5
+
+
+def test_sdi_bump_publishes_xspd_type_22_before_decel_and_decrements_nsdidist(monkeypatch):
+  from openpilot.selfdrive.carrot import carrot_serv
+
+  class Params:
+    def __init__(self, *_args):
+      self._values = {
+        "AutoNaviSpeedCtrlMode": 2,
+        "VehicleNaviCanControl": 2,
+        "AutoNaviSpeedBumpSpeed": 35,
+        "AutoNaviSpeedBumpTime": 3,
+        "AutoNaviSpeedBumpEndDistance": 200,
+        "AutoNaviSpeedDecelRate": 120,
+      }
+
+    def get(self, key):
+      return str(self._values.get(key, 0))
+
+    def get_int(self, key):
+      return int(self._values.get(key, 0))
+
+    def get_float(self, key):
+      return float(self._values.get(key, 0.0))
+
+    def get_bool(self, key):
+      return bool(self.get_int(key))
+
+  monkeypatch.setattr(carrot_serv, 'Params', Params)
+  serv = CarrotServ()
+  serv.external_navigation_active = True
+  serv.carrot_navi_active = True
+  serv.active_count = 80
+  serv.active_sdi_count = 200
+  serv.roadcate = 8
+  monkeypatch.setattr(serv, '_update_carrot_navi', lambda _sm: True)
+  monkeypatch.setattr(serv, '_update_gps', lambda *_args: 0.)
+  monkeypatch.setattr(serv, 'update_nav_instruction', lambda _sm: None)
+  monkeypatch.setattr(serv, 'update_auto_turn', lambda *_args: (250., 'none', 250., 0.))
+
+  # Primary camera is absent, secondary SDI reports a bump at 95m while road limit is 40 km/h (so source == "road")
+  serv.nSdiType = -1
+  serv.nSdiDist = 100
+  serv.nSdiPlusType = 22
+  serv.nSdiPlusDist = 95
+  serv.nRoadLimitSpeed = 40
+  serv._update_sdi()
+
+  class SubMaster(dict):
+    alive = {'carState': True, 'selfdriveState': True, 'navInstruction': False}
+
+  sm = SubMaster({
+    'carState': SimpleNamespace(
+      vEgo=10.0, speedBumpDistance=0.0, vehicleNaviActive=False,
+      speedLimit=0, speedLimitDistance=0, schoolZoneActive=False,
+      vehicleNaviSectionActive=False, vehicleNaviSpeed=0,
+      gasPressed=False, brakePressed=False,
+    ),
+    'selfdriveState': SimpleNamespace(distanceTraveled=5.0),
+  })
+  serv.totalDistance = 0.0
+  sent = {}
+  pm = SimpleNamespace(send=lambda name, message: sent.update({name: message}))
+
+  serv.update_navi('', sm, pm, 10.0, [], [], 0., 'gpsLocationExternal')
+  result = sent['carrotMan'].carrotMan
+
+  # delta_dist = 5m -> nSdiDist decrements 100 -> 95, nSdiPlusDist 95 -> 90, xSpdType == 22 published early
+  assert serv.nSdiDist == pytest.approx(95.0)
+  assert result.xSpdType == 22
+  assert result.xSpdDist == 90
+  assert result.xSpdLimit == 35
+

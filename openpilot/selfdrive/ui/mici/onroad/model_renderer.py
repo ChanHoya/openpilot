@@ -8,6 +8,7 @@ from openpilot.common.params import Params
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.selfdrive.locationd.calibrationd import HEIGHT_INIT
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
+from openpilot.selfdrive.ui.onroad.view_3d_scene import View3dScene, C4_SIZES
 from openpilot.selfdrive.ui.vision_status import blindspot_source_packet, blindspot_sources
 from openpilot.selfdrive.ui.road_markings import lane_dash_segments, project_blindspot_barrier, blindspot_barrier_quads
 from openpilot.selfdrive.ui.mici.onroad import blend_colors
@@ -95,6 +96,9 @@ class ModelRenderer(Widget):
     self._acceleration_x_filter = FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps)
     self._acceleration_x_filter2 = FirstOrderFilter(0.0, 1, 1 / gui_app.target_fps)
 
+    self._view_3d_mode: bool = False
+    self._view_3d_is_night: bool = True
+
     self._torque_filter = FirstOrderFilter(0, 0.1, 1 / gui_app.target_fps)
     self._ll_color_filter = FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps)
 
@@ -121,6 +125,28 @@ class ModelRenderer(Widget):
   def set_transform(self, transform: np.ndarray):
     self._car_space_transform = transform.astype(np.float32)
     self._transform_dirty = True
+
+  def set_view_3d_mode(self, enabled: bool, is_night: bool = True) -> None:
+    self._view_3d_mode = enabled
+    self._view_3d_is_night = is_night
+
+  set_fsd_mode = set_view_3d_mode
+
+  @property
+  def _fsd_mode(self) -> bool:
+    return self._view_3d_mode
+
+  @_fsd_mode.setter
+  def _fsd_mode(self, val: bool) -> None:
+    self._view_3d_mode = val
+
+  @property
+  def _fsd_is_night(self) -> bool:
+    return self._view_3d_is_night
+
+  @_fsd_is_night.setter
+  def _fsd_is_night(self, val: bool) -> None:
+    self._view_3d_is_night = val
 
   def _render(self, rect: rl.Rectangle):
     state = self._overlay_state
@@ -181,10 +207,9 @@ class ModelRenderer(Widget):
         
       self._transform_dirty = False
 
-    # Draw elements (hide when disengaged)
+    # AR View and 3D View share all elements, while 3D view replaces lead box with 3D sedan graphic
     self._draw_lane_lines()
     if ui_state.status != UIStatus.DISENGAGED:
-      #self._draw_lane_lines()
       self._draw_path(sm)
 
     self._draw_blindspots(sm)
@@ -523,6 +548,28 @@ class ModelRenderer(Widget):
       rl.draw_triangle_fan(lead.chevron, len(lead.chevron), rl.Color(201, 34, 49, lead.fill_alpha))
 
   def _draw_lead_indicator(self):
+    is_3d = getattr(self, '_view_3d_mode', False) or getattr(self, '_fsd_mode', False)
+    is_night = getattr(self, '_view_3d_is_night', getattr(self, '_fsd_is_night', True))
+    if is_3d:
+      from openpilot.selfdrive.ui.onroad import view_3d_draw
+      for idx, lead in enumerate(self._lead_vehicles):
+        if not lead.rect:
+          continue
+        pts = lead.rect
+        xs = [float(p.x) for p in pts]
+        ys = [float(p.y) for p in pts]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        box_w = max_x - min_x
+        box_h = max_y - min_y
+        car_w = float(box_w * 0.82)
+        car_h = float(car_w * 0.72)
+        car_cx = float((min_x + max_x) / 2.0)
+        car_cy = float(max_y - car_h * 0.46)
+        style = 'lead' if idx == 0 else 'adj'
+        view_3d_draw.draw_sleek_sedan_rear(car_cx, car_cy, car_w, car_h, is_night, style=style)
+      return
+
     # Carrot: draw outline rectangles only (no fill)
     thickness = 4.0  # 원하는 두께 (float)
 
@@ -728,3 +775,22 @@ class ModelRenderer(Widget):
       #)
 
       draw_text_ui_style(item.text, tx, ty, font_size, rl.WHITE, font=self._font_display, border_width=1.0, shadow_offset=8.0, align="left_top", y_offset=0.0)
+
+  def _draw_polygon_outline_carrot(self, points, color, width=1.5):
+    if len(points) < 2:
+      return
+    for i in range(len(points) - 1):
+      p1 = rl.Vector2(float(points[i][0]), float(points[i][1]))
+      p2 = rl.Vector2(float(points[i+1][0]), float(points[i+1][1]))
+      rl.draw_line_ex(p1, p2, width, color)
+
+  def _draw_3d_view_visualization(self, sm):
+    """3D view: virtual chase camera that widens near close leads and sharp curves."""
+    if not sm.valid['modelV2']:
+      return
+    if not hasattr(self, '_view_3d_scene'):
+      self._view_3d_scene = View3dScene(C4_SIZES)
+    is_night = getattr(self, '_view_3d_is_night', getattr(self, '_fsd_is_night', True))
+    self._view_3d_scene.draw(self, sm, self._rect, is_night)
+
+  _draw_fsd_visualization = _draw_3d_view_visualization

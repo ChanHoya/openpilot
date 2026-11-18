@@ -426,31 +426,42 @@ std::optional<bool> process_panda_state(const std::vector<Panda *> &pandas, PubM
     connected_serials.push_back(panda->hw_serial());
   }
 
+  static int unhealthy_ticks = 0;
+
   auto ignition_opt = send_panda_states(pm, pandas, is_onroad, spoofing_started);
+  bool comms_healthy = true;
+  for (Panda *panda : pandas) {
+    comms_healthy &= panda->comms_healthy();
+  }
+
+  if (!ignition_opt || !comms_healthy) {
+    unhealthy_ticks++;
+  } else {
+    unhealthy_ticks = 0;
+  }
+
+  if (!comms_healthy && (!ignition_opt.value_or(true) || unhealthy_ticks >= 5)) {
+    LOGE("Reconnecting, communication to pandas not healthy (unhealthy_ticks=%d)", unhealthy_ticks);
+    do_exit = true;
+  } else if (!ignition_opt && unhealthy_ticks >= 5) {
+    LOGE("Reconnecting, failed to read panda state (unhealthy_ticks=%d)", unhealthy_ticks);
+    do_exit = true;
+  }
+
   if (!ignition_opt) {
     LOGE("Failed to get ignition_opt");
     return std::nullopt;
   }
 
-  // check if we should have pandad reconnect
-  if (!ignition_opt.value()) {
-    bool comms_healthy = true;
-    for (Panda *panda : pandas) {
-      comms_healthy &= panda->comms_healthy();
-    }
-
-    if (!comms_healthy) {
-      LOGE("Reconnecting, communication to pandas not healthy");
-      do_exit = true;
-    } else if (!is_onroad) {
-      // A C3 red panda can enumerate after its internal DOS. Restart the
-      // wrapper so it can sort and launch the complete set.
-      for (const std::string &serial : Panda::list(true)) {
-        if (!std::count(connected_serials.begin(), connected_serials.end(), serial)) {
-          LOGW("Reconnecting to new panda: %s", serial.c_str());
-          do_exit = true;
-          break;
-        }
+  // check if we should have pandad reconnect for newly enumerated pandas offroad
+  if (!ignition_opt.value() && !is_onroad) {
+    // A C3 red panda can enumerate after its internal DOS. Restart the
+    // wrapper so it can sort and launch the complete set.
+    for (const std::string &serial : Panda::list(true)) {
+      if (!std::count(connected_serials.begin(), connected_serials.end(), serial)) {
+        LOGW("Reconnecting to new panda: %s", serial.c_str());
+        do_exit = true;
+        break;
       }
     }
   }

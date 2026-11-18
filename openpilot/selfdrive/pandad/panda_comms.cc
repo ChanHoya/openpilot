@@ -217,6 +217,8 @@ int PandaUsbHandle::bulk_read(unsigned char endpoint, unsigned char* data, int l
       LOGE_100("overflow got 0x%x", transferred);
     } else if (err != 0) {
       handle_usb_issue(err, __func__);
+    } else {
+      comms_healthy = true;
     }
   } while (err != 0 && connected);
 

@@ -406,6 +406,7 @@ int PandaSpiHandle::bulk_transfer(uint8_t endpoint, uint8_t *tx_data, uint16_t t
     }
   }
 
+  comms_healthy = true;
   return ret;
 }
 

@@ -73,3 +73,22 @@ def test_curvature_is_continuous_at_floor(action_functions):
   before = run_action(action_functions, 2.5 - 1e-8, .1).desiredCurvature
   after = run_action(action_functions, 2.5 + 1e-8, .1).desiredCurvature
   assert abs(after - before) < 1e-9
+
+
+def test_action_curvature_normalizes_vision_speed_overshoot_only(action_functions):
+  prev = SimpleNamespace(desiredCurvature=.007, desiredAcceleration=.1, desiredVelocity=10.)
+
+  def eval_vx(v_ego, vx, lat_accel):
+    plan = np.zeros((1, ModelConstants.IDX_N, ModelConstants.PLAN_WIDTH))
+    plan[0, :, Plan.VELOCITY][:, 0] = vx
+    output = {'plan': plan, 'action': np.array([[lat_accel, -0.2]])}
+    return action_functions.get_action_from_model(output, prev, 0.3, 0.4, v_ego, 0.0, 0.05).desiredCurvature
+
+  # +21.9% vision-speed overshoot (seg 19 t=33.5: v_ego=10.0, vx=12.19, ay=2.42) normalizes downward
+  normalized = eval_vx(10.0, 12.19, 2.42)
+  assert normalized < 0.019
+  assert normalized == pytest.approx(2.42 / ((12.19 / 1.04) ** 2), rel=1e-6)
+
+  # Lower vision speed (braking) and within +5% tolerance keep exact v_ego^2 denominator
+  assert eval_vx(10.0, 8.0, 2.0) == pytest.approx(2.0 / (10.0 ** 2), rel=1e-6)
+  assert eval_vx(10.0, 10.4, 2.0) == pytest.approx(2.0 / (10.0 ** 2), rel=1e-6)

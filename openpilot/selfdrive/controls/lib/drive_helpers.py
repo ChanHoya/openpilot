@@ -305,7 +305,7 @@ def _lane_center_and_width(lane_lines, lane_line_probs) -> tuple[float, float, f
   else:
     return None
 
-  lane_conf *= float(np.interp(abs(y_center), [1.2, 1.8], [1.0, 0.0]))
+  lane_conf *= float(np.interp(abs(y_center), [1.65, 2.25], [1.0, 0.0]))
   if lane_conf <= 0.0:
     return None
   return y_center, lane_width, lane_conf
@@ -377,6 +377,8 @@ def compute_curve_inner_curvature_assist(base_curvature, yaws, yaw_rates, t_idxs
 
   # High-speed damping: reduce inner target shift at high speeds (v > 50 km/h) to prevent hugging too tight
   speed_damping = float(np.interp(v_ego * 3.6, [45.0, 75.0, 100.0], [1.0, 0.65, 0.40]))
+  # High-curvature tapering: avoid stacking extra inward bias on already tight curves (R < 125m)
+  high_curv_taper = float(np.interp(abs(base), [0.008, 0.018], [1.0, 0.20]))
 
   # Dominant curve sign: prioritize current established curvature over noisy preview in S-curves
   if abs(base) >= 0.001:
@@ -384,39 +386,67 @@ def compute_curve_inner_curvature_assist(base_curvature, yaws, yaw_rates, t_idxs
   else:
     curve_sign = 1.0 if preview_curvature >= 0.0 else -1.0
 
+  lane_est = _lane_center_and_width(lane_lines, lane_line_probs)
+  already_inside = False
+  if lane_est is not None:
+    y_center, lane_width, lane_conf = lane_est
+    drift_metric = curve_sign * y_center
+    max_inner_shift = min(0.24 * bias_strength * curve_activity * speed_damping * high_curv_taper, max(0.0, 0.5 * lane_width - 1.25))
+    inside_clearance = 0.5 * lane_width + drift_metric
+    try:
+      if lane_lines is not None and lane_line_probs is not None and len(lane_lines) >= 3 and len(lane_line_probs) >= 3:
+        if curve_sign > 0.0 and float(lane_line_probs[2]) > 0.40:
+          y_in = _near_lane_y(lane_lines[2])
+          if y_in is not None and -1.5 <= y_in <= 4.0:
+            inside_clearance = y_in
+        elif curve_sign < 0.0 and float(lane_line_probs[1]) > 0.40:
+          y_in = _near_lane_y(lane_lines[1])
+          if y_in is not None and -4.0 <= y_in <= 1.5:
+            inside_clearance = -y_in
+    except (TypeError, IndexError, ValueError):
+      pass
+    already_inside = (drift_metric < -max_inner_shift) or (inside_clearance < 1.25)
+
   # 1. Curve-entry preview lead: advance steering as curvature builds ahead in same direction
   delta_kappa_lead = 0.0
-  if (preview_curvature * curve_sign) > 0.0 and abs(preview_curvature) > abs(base):
-    delta_kappa_lead = 0.35 * bias_strength * curve_activity * s_curve_factor * (preview_curvature - base)
+  if not already_inside and (preview_curvature * curve_sign) > 0.0 and abs(preview_curvature) > abs(base):
+    delta_kappa_lead = 0.35 * bias_strength * curve_activity * s_curve_factor * high_curv_taper * (preview_curvature - base)
 
   # 2. Lane-bounded inner-curve bias & asymmetric outer-drift guard
   delta_kappa_lane = 0.0
   is_outer_drift = False
-  lane_est = _lane_center_and_width(lane_lines, lane_line_probs)
+  intrusion_blend = 0.0
   if lane_est is not None:
-    y_center, lane_width, lane_conf = lane_est
-    drift_metric = curve_sign * y_center
-    max_inner_shift = min(0.24 * bias_strength * curve_activity * speed_damping, max(0.0, 0.5 * lane_width - 1.25))
     target_y = y_center + curve_sign * max_inner_shift
     lookahead_dist = float(np.clip(v_ego * 0.95, 9.0, 24.0))
     pure_pursuit_curv = (2.0 * target_y) / (lookahead_dist ** 2)
 
-    if drift_metric > 0.02:
-      # Drifting toward outside of curve: strong corrective recovery
+    inner_overshoot = max(0.0, -drift_metric - max_inner_shift)
+    line_intrusion = max(0.0, 1.20 - inside_clearance)
+    if drift_metric > 0.02 and line_intrusion <= 0.0:
+      # Drifting toward outside of curve: corrective recovery (tapered on tight high-curvature turns)
       is_outer_drift = True
-      outer_boost = 1.45
+      outer_boost = float(np.interp(abs(base), [0.008, 0.018], [1.45, 1.05]))
       delta_kappa_lane = lane_conf * ramp * s_curve_factor * apex_factor * (0.60 + 0.40 * bias_strength) * outer_boost * pure_pursuit_curv
-    elif drift_metric < -max_inner_shift:
-      # Already hugging curve inside deeper than desired: do not pull further inside!
-      # Mild centering to prevent cutting the corner line
-      delta_kappa_lane = lane_conf * ramp * 0.20 * pure_pursuit_curv
+    elif drift_metric < -max_inner_shift or line_intrusion > 0.0:
+      # Already hugging or crossing inside lane line: smoothly escalate outward centering to stay inside lane
+      intrusion_blend = max(
+        float(np.interp(line_intrusion, [0.0, 0.45], [0.0, 1.0])),
+        float(np.interp(inner_overshoot, [0.25, 0.75], [0.0, 1.0])),
+      )
+      inner_gain = float(np.interp(intrusion_blend, [0.0, 1.0], [0.25, 1.15]))
+      delta_kappa_lane = lane_conf * max(ramp, intrusion_blend) * inner_gain * pure_pursuit_curv
     else:
       # Centered or mild inside: gentle guidance only at entry
-      delta_kappa_lane = lane_conf * ramp * s_curve_factor * apex_factor * 0.45 * pure_pursuit_curv
+      delta_kappa_lane = lane_conf * ramp * s_curve_factor * apex_factor * high_curv_taper * 0.45 * pure_pursuit_curv
 
-  outer_headroom = 1.30 if is_outer_drift else 1.0
-  max_delta = (0.28 + 0.42 * bias_strength) * ramp * outer_headroom / max(v_ego ** 2, 25.0)
-  delta_kappa = float(np.clip(delta_kappa_lead + delta_kappa_lane, -max_delta, max_delta))
+  outer_headroom = 1.30 if is_outer_drift else float(np.interp(intrusion_blend, [0.0, 1.0], [1.0, 2.60]))
+  max_delta = (0.28 + 0.42 * bias_strength) * max(ramp, intrusion_blend) * outer_headroom / max(v_ego ** 2, 25.0)
+  raw_delta = delta_kappa_lead + delta_kappa_lane
+  # Never let outward inside-line correction reverse the curve direction
+  if intrusion_blend > 0.0 and (raw_delta * curve_sign) < 0.0 and abs(base) > 0.004:
+    max_delta = min(max_delta, 0.45 * abs(base))
+  delta_kappa = float(np.clip(raw_delta, -max_delta, max_delta))
   return float(base + delta_kappa)
 
 

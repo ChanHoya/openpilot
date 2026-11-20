@@ -522,16 +522,22 @@ class HumanLongitudinalShaper:
         a_kin_eff = a_kin_close
 
       close_lead = (d_safe < max(28.0, v_safe * 1.25)) or (phys_margin < 0.0)
-      stopping_lead = (v_lead_safe <= 2.0 and d_safe < max(30.0, v_safe * 2.4))
+      stopping_lead = (v_lead_safe <= 2.5 and d_safe < max(42.0, v_safe * 3.3))
+      closing_braking_lead = (
+        d_safe < max(45.0, v_safe * 2.8)
+        and v_rel_safe < -2.2
+        and (a_lead_f < -1.0 or a_lead_safe < -1.8)
+      )
       is_urgent = bool(
-        fcw or should_stop or danger_ok or stopping_lead
-        or ttc < 3.6 or a_kin_eff < -1.55
+        fcw or should_stop or danger_ok or stopping_lead or closing_braking_lead
+        or ttc < 4.2 or a_kin_eff < -1.25
         or (phys_margin < -1.5 and v_rel_safe < -0.6)
-        or (close_lead and (v_rel_safe < -2.4 or a_lead_f < -1.8 or a_lead_safe < -3.0))
-        or (a_mpc < -1.85 and (ttc < 6.0 or close_lead))
+        or (close_lead and (v_rel_safe < -2.4 or a_lead_f < -1.5 or a_lead_safe < -2.5))
+        or (a_mpc < -1.50 and (ttc < 6.5 or close_lead or a_kin_eff < -0.85))
       )
       hard_emergency = bool(
-        fcw or should_stop or danger_ok or ttc < 2.8 or a_kin_eff < -2.2 or a_mpc < -2.4
+        fcw or should_stop or danger_ok or stopping_lead
+        or ttc < 3.0 or a_kin_eff < -1.85 or a_mpc < -2.20
       )
     else:
       d_safe = 0.0
@@ -563,40 +569,44 @@ class HumanLongitudinalShaper:
         shaped = True
 
     # 2) Kinematic high-speed closing pre-decel only for confirmed closing threats (>55 km/h)
+    vision_closing_ok = (
+      d_safe < max(55.0, min(85.0, v_safe * 3.2))
+      and (v_rel_safe < -3.0 or a_kin_eff < -0.85)
+    )
     if (lead_status and v_kph > 55.0 and d_safe > max(8.0, float(stop_dist) + 2.0)
         and not (blinker_active or lane_change_active)
-        and (lead_radar or d_safe < 55.0)
-        and (ttc < 7.0 or d_gap < 8.0) and a_kin_eff < -0.60):
-      if v_rel_safe < -1.8 or (v_rel_safe < -1.0 and a_lead_f < -1.2):
+        and (lead_radar or vision_closing_ok)
+        and (ttc < 7.5 or d_gap < 8.0) and a_kin_eff < -0.55):
+      if v_rel_safe < -1.8 or (v_rel_safe < -1.0 and a_lead_f < -1.0):
         sw = float(np.clip(np.interp(v_kph, [55.0, 75.0], [0.0, 1.0]), 0.0, 1.0))
-        early = float(np.clip(a_kin_eff * 1.15 * sw, -1.65, a_coast))
+        early = float(np.clip(a_kin_eff * 1.15 * sw, -1.85, a_coast))
         if target > early:
           target = early
           shaped = True
 
-    # 2b) Sudden lead acquisition and lane-change shock damper
-    if lead_status and not hard_emergency and target < -0.55 and v_safe > 8.0:
-      if (blinker_active or lane_change_active) and ttc >= 3.5 and d_gap > 0.0:
-        lc_floor = max(min(a_kin_eff * 1.15 - 0.15, a_coast), -1.10)
+    # 2b) Sudden lead acquisition and lane-change shock damper (non-urgent / non-stopping leads only)
+    if lead_status and not is_urgent and not hard_emergency and target < -0.55 and v_safe > 8.0 and v_lead_safe > 3.0:
+      if (blinker_active or lane_change_active) and ttc >= 4.0 and d_gap > 3.0 and a_kin_eff > -0.95:
+        lc_floor = max(min(a_kin_eff * 1.20 - 0.15, a_coast), -1.25)
         if target < lc_floor:
           target = lc_floor
           shaped = True
-      if self.lead_age < 0.9 and d_gap > 5.0 and ttc >= 4.0:
+      if self.lead_age < 0.7 and d_gap > 8.0 and ttc >= 5.0 and a_kin_eff > -0.85 and a_lead_f > -1.0:
         acq_floor = max(min(a_kin_eff * 1.25 - 0.20, a_coast), -1.25)
         if target < acq_floor:
           target = acq_floor
           shaped = True
 
-    # 3) Human coast-first floor and accel-to-coast dwell (never lift cruise-driven decel)
+    # 3) Human coast-first floor and accel-to-coast dwell (never lift cruise-driven or closing decel)
     if (lead_status and d_safe > 0.1 and not is_urgent and v_safe > 3.5 and v_lead_safe > 2.5
-        and target < 0.0 and mpc_source != 'cruise' and curve_decel < 0.05):
-      if d_headroom >= -1.5 and v_rel_safe >= -1.8 and a_lead_f >= -1.5:
+        and target < 0.0 and target >= -0.95 and a_kin_eff >= -0.55 and mpc_source != 'cruise' and curve_decel < 0.05):
+      if d_headroom >= -1.5 and v_rel_safe >= -1.6 and a_lead_f >= -1.3:
         u_gap = float(np.interp(d_headroom, [-1.5, 0.5, 4.0], [1.0, 0.25, 0.0]))
         u_vr = float(np.interp(v_rel_safe, [-1.8, -1.1, -0.4], [1.0, 0.25, 0.0]))
         u_al = float(np.interp(a_lead_f, [-1.5, -0.95, -0.4], [1.0, 0.25, 0.0]))
         u = max(u_gap, u_vr, u_al)
-        if self.last_pos_age < 1.8 and u < 0.75:
-          u *= float(np.interp(self.coast_dwell, [0.0, 1.0], [0.10, 1.0]))
+        if self.last_pos_age < 1.8 and u < 0.70:
+          u *= float(np.interp(self.coast_dwell, [0.0, 1.0], [0.25, 1.0]))
         gentle_coast = max(a_coast, -0.22) if u < 0.2 else a_coast
         coast_floor = float(np.interp(u, [0.0, 1.0], [gentle_coast, min(a_coast - 0.85, target)]))
         if target < coast_floor:
@@ -614,9 +624,20 @@ class HumanLongitudinalShaper:
     if not is_urgent:
       if target < prev_before:
         max_down_rate = 1.25 if (mpc_source == 'cruise' and target < -0.45) else (0.90 if prev_before > 0.0 else 0.85)
+        if lead_status:
+          threat_scale = max(
+            float(np.interp(-v_rel_safe, [1.2, 2.5], [0.0, 1.0])),
+            float(np.interp(-a_kin_eff, [0.40, 0.75], [0.0, 1.0])),
+            float(np.interp(-a_lead_f, [0.85, 1.50], [0.0, 1.0])),
+          )
+          brake_need = max(0.0, -a_kin_eff, -target * threat_scale)
+          max_down_rate = max(max_down_rate, float(np.interp(brake_need, [0.45, 0.90, 1.50], [0.85, 1.55, 2.80])))
+          if prev_before > 0.05 and v_rel_safe < -1.0:
+            lift_rate = float(np.interp(-v_rel_safe, [1.0, 4.0], [1.20, 3.00]))
+            max_down_rate = max(max_down_rate, lift_rate)
         if curve_decel > 0.55:
           max_down_rate = max(max_down_rate, float(np.interp(curve_decel, [0.55, 1.50], [0.90, 1.45])))
-        if lead_status and self.lead_age < 0.9 and d_gap > 5.0 and ttc >= 4.0:
+        if prev_before <= 0.05 and lead_status and self.lead_age < 0.7 and d_gap > 8.0 and ttc >= 5.0 and a_kin_eff > -0.85 and a_lead_f > -1.0:
           max_down_rate = min(max_down_rate, 1.20)
         new_t = max(target, prev_before - max_down_rate * self.dt)
         if new_t != target:
@@ -634,7 +655,7 @@ class HumanLongitudinalShaper:
           shaped = True
     else:
       if target < prev_before:
-        urg_down = 6.0 if hard_emergency else 2.4
+        urg_down = 8.0 if hard_emergency else 4.2
         new_t = max(target, prev_before - urg_down * self.dt)
         if new_t != target:
           target = new_t

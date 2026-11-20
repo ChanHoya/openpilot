@@ -500,6 +500,10 @@ class LongitudinalPlanner:
         except (KeyError, TypeError):
           model_msg = None
         prev_output_a = output_a_target
+        tesla_traffic_active = bool(
+          (getattr(self, 'tesla_traffic_decision', None) is not None and self.tesla_traffic_decision.active)
+          or getattr(self, 'tesla_traffic_blended', False)
+        )
         res = self.human_longitudinal.shape(
           a_mpc=output_a_target,
           v_target_mpc=output_v_target_now,
@@ -518,7 +522,7 @@ class LongitudinalPlanner:
           stop_dist=float(getattr(carrot, 'stop_distance', 6.0)),
           should_stop=bool(self.output_should_stop),
           fcw=bool(self.fcw),
-          reset_state=bool(reset_state or cs.gasPressed or cs.brakePressed),
+          reset_state=bool(reset_state or cs.gasPressed or cs.brakePressed or tesla_traffic_active),
           mpc_mode=self.mpc.mode,
           predicted_danger_margin=float(getattr(self.mpc, 'predicted_danger_margin', 1e3)),
           mpc_source=str(getattr(self.mpc, 'source', 'lead0')),
@@ -534,14 +538,19 @@ class LongitudinalPlanner:
         output_j_target_now = res.j_target_now
         if res.curve_decel > 0.05:
           coasting_turn_blocked = True
+        closing_or_braking_lead = (
+          bool(getattr(lead_one, 'status', False))
+          and (float(getattr(lead_one, 'vRel', 0.0)) < -1.0 or float(getattr(lead_one, 'aLeadK', 0.0)) < -0.8)
+        )
         if res.shaped and not res.is_urgent:
           if res.a_target > prev_output_a + 0.02:
-            self.a_desired = max(self.a_desired, res.a_target)
-            target_v_sync = v_ego + res.a_target * self.dt
-            self.v_desired_filter.x = max(self.v_desired_filter.x, target_v_sync)
-            if res.a_target >= res.a_coast - 0.05 and self.v_desired_filter.x < v_ego - 0.15:
-              alpha = float(np.clip(self.dt / 0.45, 0.0, 1.0))
-              self.v_desired_filter.x += alpha * (target_v_sync - self.v_desired_filter.x)
+            if not (prev_output_a < -0.55 and closing_or_braking_lead):
+              self.a_desired = max(self.a_desired, res.a_target)
+              target_v_sync = v_ego + res.a_target * self.dt
+              self.v_desired_filter.x = max(self.v_desired_filter.x, target_v_sync)
+              if res.a_target >= res.a_coast - 0.05 and self.v_desired_filter.x < v_ego - 0.15:
+                alpha = float(np.clip(self.dt / 0.45, 0.0, 1.0))
+                self.v_desired_filter.x += alpha * (target_v_sync - self.v_desired_filter.x)
           elif res.a_target < prev_output_a - 0.02:
             self.a_desired = min(self.a_desired, res.a_target)
             self.v_desired_filter.x = min(self.v_desired_filter.x, v_ego + res.a_target * self.dt)

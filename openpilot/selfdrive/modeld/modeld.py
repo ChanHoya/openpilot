@@ -131,8 +131,17 @@ def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.
                                                 v_ego,
                                                 lat_action_t)
   else:
-    desired_accel = model_output['action'][0,1]
-    desired_curvature = model_output['action'][0,0] / (max(2.5, v_ego))**2
+    desired_accel = model_output['action'][0, 1]
+    v_curv = max(2.5, float(v_ego))
+    if v_ego > 5.0 and len(plan) == len(ModelConstants.T_IDXS):
+      vx_action = float(np.interp(lat_action_t, ModelConstants.T_IDXS, plan[:, Plan.VELOCITY][:, 0]))
+      # Direct-action models predict lateral accel at their internal vision speed vx_action.
+      # When real v_ego has decelerated significantly below vx_action (beyond ~5% calibration tolerance),
+      # dividing by v_ego^2 inflates curvature by (vx_action/v_ego)^2; normalize denominator upward only.
+      if np.isfinite(vx_action) and vx_action > float(v_ego) * 1.05:
+        v_excess = vx_action / 1.04
+        v_curv = max(v_curv, min(v_excess, float(v_ego) * 1.35))
+    desired_curvature = model_output['action'][0, 0] / (v_curv ** 2)
     #should_stop = (v_ego < 0.3 and desired_accel < 0.1)
 
   lane_lines = None

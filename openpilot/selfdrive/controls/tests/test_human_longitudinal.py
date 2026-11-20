@@ -611,3 +611,113 @@ def test_crisp_brake_release_when_lead_clears():
 
   assert outputs[-1] >= -0.35  # Released to coast band inside 0.5s (vs >1.5s hang at 0.65 m/s^3)
   assert (outputs[1] - outputs[0]) / 0.05 >= 2.0
+
+
+def test_high_speed_slowing_lead_and_cutout_stopped_car_brakes_promptly():
+  """High-speed closing/braking leads, vision-to-radar stopped cars, and cut-out reveals brake promptly without -1.25 clamping."""
+  # Case 1: 85 km/h closing on slowing vision lead at d=66m (a_lead=-1.5) triggers timely braking >= -1.40 within 0.50s
+  shaper1 = HumanLongitudinalShaper(dt=0.05)
+  v1 = 85.0 / 3.6
+  for _ in range(5):
+    _step_shaper(shaper1, a_mpc=0.15, v_ego=v1, a_ego=0.15, lead_status=False)
+  outs1 = []
+  for i in range(10):
+    shaper1.update_lead_filter(True, -1.5, 1)
+    res1 = shaper1.shape(
+      a_mpc=-1.55, v_target_mpc=v1 - 0.3, j_target_mpc=0.0, v_ego=v1, a_ego=0.15 if i == 0 else outs1[-1],
+      pitch=0.0, action_t=0.25, lead_status=True, d_rel=66.0 - i * 0.4, v_rel=-8.3, v_lead=v1 - 8.3, a_lead=-1.5,
+      t_follow=0.92, comfort_brake=2.5, stop_dist=5.0, should_stop=False, fcw=False,
+      reset_state=False, mpc_mode="acc", lead_radar=False,
+    )
+    outs1.append(res1.a_target)
+  assert res1.is_urgent
+  assert outs1[-1] <= -1.40
+
+  # Case 2: seg 19 t=57.5..58.3 style: accelerating +0.85, vision lead closes -> crisp lift-off, then stopped radar at 38.8m -> <= -2.0 inside 0.35s
+  shaper2 = HumanLongitudinalShaper(dt=0.05)
+  v2 = 43.0 / 3.6
+  for _ in range(5):
+    _step_shaper(shaper2, a_mpc=0.85, v_ego=v2, a_ego=0.85, lead_status=False)
+  lift_outs = []
+  for i in range(6):
+    shaper2.update_lead_filter(True, -0.6, -1)
+    r = shaper2.shape(
+      a_mpc=-0.50, v_target_mpc=v2, j_target_mpc=0.0, v_ego=v2, a_ego=0.85,
+      pitch=0.0, action_t=0.25, lead_status=True, d_rel=50.0 - i * 0.25, v_rel=-5.0, v_lead=v2 - 5.0, a_lead=-0.6,
+      t_follow=1.0, comfort_brake=2.5, stop_dist=5.0, should_stop=False, fcw=False,
+      reset_state=False, mpc_mode="acc", lead_radar=False,
+    )
+    lift_outs.append(r.a_target)
+  assert lift_outs[-1] <= 0.15
+
+  stop_outs = []
+  for i in range(7):
+    shaper2.update_lead_filter(True, 0.0, 2)
+    r = shaper2.shape(
+      a_mpc=-2.80, v_target_mpc=v2 - 0.5, j_target_mpc=0.0, v_ego=v2, a_ego=-0.5,
+      pitch=0.0, action_t=0.25, lead_status=True, d_rel=38.8 - i * 0.55, v_rel=0.4 - v2, v_lead=0.4, a_lead=0.0,
+      t_follow=1.0, comfort_brake=2.5, stop_dist=5.0, should_stop=False, fcw=False,
+      reset_state=False, mpc_mode="acc", lead_radar=True,
+    )
+    stop_outs.append(r.a_target)
+  assert stop_outs[-1] <= -2.0
+
+  # Case 3: lead cut-out suddenly reveals stopped/slow car ahead at 58m (v_ego=23 m/s, v_lead=2.0 m/s) -> must NOT clamp at -1.25
+  shaper3 = HumanLongitudinalShaper(dt=0.05)
+  v3 = 23.0
+  for _ in range(6):
+    _step_shaper(shaper3, a_mpc=0.20, v_ego=v3, a_ego=0.20, lead_status=True, d_rel=75.0, v_rel=0.0, v_lead=v3, track_id=10)
+  cutout_outs = []
+  for i in range(8):
+    shaper3.update_lead_filter(True, 0.0, 11)
+    r = shaper3.shape(
+      a_mpc=-2.60, v_target_mpc=v3 - 0.6, j_target_mpc=0.0, v_ego=v3, a_ego=0.20 if i == 0 else cutout_outs[-1],
+      pitch=0.0, action_t=0.25, lead_status=True, d_rel=58.0 - i * 1.0, v_rel=2.0 - v3, v_lead=2.0, a_lead=0.0,
+      t_follow=0.92, comfort_brake=2.5, stop_dist=5.0, should_stop=False, fcw=False,
+      reset_state=False, mpc_mode="acc", lead_radar=True,
+    )
+    cutout_outs.append(r.a_target)
+  assert shaper3.lead_age < 0.5
+  assert cutout_outs[3] < -1.25
+  assert cutout_outs[-1] <= -2.40
+
+
+def test_tesla_traffic_active_bypasses_shaper():
+  from openpilot.selfdrive.controls.lib.human_longitudinal import HumanLongitudinalShaper
+
+  shaper = HumanLongitudinalShaper()
+  # Build up positive acceleration state first
+  for _ in range(10):
+    shaper.shape(
+      a_mpc=0.9, v_target_mpc=16.0, j_target_mpc=0.5,
+      v_ego=15.0, a_ego=0.8, pitch=0.0, action_t=0.05,
+      lead_status=False, d_rel=100.0, v_rel=0.0, v_lead=20.0, a_lead=0.0,
+      t_follow=1.2, comfort_brake=2.4, stop_dist=4.0,
+      should_stop=False, fcw=False, reset_state=False,
+    )
+
+  # When LongitudinalPlanner activates tesla_traffic_active -> passes reset_state=True,
+  # shaper must immediately return MPC deceleration without ramp lag.
+  res = shaper.shape(
+    a_mpc=-2.5, v_target_mpc=12.5, j_target_mpc=-3.0,
+    v_ego=15.0, a_ego=0.0, pitch=0.0, action_t=0.05,
+    lead_status=False, d_rel=100.0, v_rel=0.0, v_lead=20.0, a_lead=0.0,
+    t_follow=1.2, comfort_brake=2.4, stop_dist=4.0,
+    should_stop=True, fcw=False, reset_state=True,
+  )
+  assert res.a_target == -2.5
+  assert res.v_target_now == 12.5
+  assert res.j_target_now == -3.0
+  assert res.shaped is False
+  assert res.is_urgent is True
+
+  # Immediately after reset_state releases, internal state starts from a_ego (0.0), not prior +0.9,
+  # and ramps down at urgent rate (-0.4 on first 0.05s step).
+  res_after = shaper.shape(
+    a_mpc=-2.5, v_target_mpc=12.4, j_target_mpc=-3.0,
+    v_ego=14.9, a_ego=-1.5, pitch=0.0, action_t=0.05,
+    lead_status=False, d_rel=100.0, v_rel=0.0, v_lead=20.0, a_lead=0.0,
+    t_follow=1.2, comfort_brake=2.4, stop_dist=4.0,
+    should_stop=True, fcw=False, reset_state=False,
+  )
+  assert res_after.a_target <= -0.35

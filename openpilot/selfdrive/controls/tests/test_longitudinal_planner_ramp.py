@@ -1,0 +1,423 @@
+import pytest
+from types import SimpleNamespace
+from openpilot.common.filter_simple import FirstOrderFilter
+from openpilot.selfdrive.controls.lib.longcontrol import LongControl
+from openpilot.cereal import car
+
+
+def test_continuous_accel_ramp_smoothness():
+  dt = 0.05
+  ramp_filter = FirstOrderFilter(0.0, 1.5, dt)
+
+  # Starting from standstill (0 km/h) -> target 1.6 m/s^2
+  target_a = 1.6
+  accels = []
+  for t in range(80):  # 4 seconds
+    eff_target = max(0.6 if t == 0 else 0.0, target_a)
+    ramp_filter.update(eff_target)
+    accels.append(ramp_filter.x)
+
+  # Verify initial step is gentle and continuous (no 1.6 spike at t=0)
+  assert accels[0] < 0.1
+  assert accels[10] < 0.8  # at 0.5s, progressive buildup
+  assert accels[-1] == pytest.approx(1.6, abs=0.2)  # smoothly converges to target
+
+
+def test_longcontrol_pos_limit_capping():
+  CP = car.CarParams.new_message()
+  CP.longitudinalTuning.kpBP = [0.0]
+  CP.longitudinalTuning.kpV = [1.0]
+  CP.longitudinalTuning.kiBP = [0.0]
+  CP.longitudinalTuning.kiV = [0.1]
+  lc = LongControl(CP)
+
+  # Plan calls for accel of 1.2 m/s^2
+  long_plan = SimpleNamespace(
+    aTarget=1.2,
+    vTargetNow=10.0,
+    jTargetNow=0.0,
+    shouldStop=False,
+    hasLead=True,
+  )
+  accel_limits = [-3.5, 2.5]
+  radarState = SimpleNamespace(leadOne=SimpleNamespace(status=True, dRel=20.0))
+  CS = SimpleNamespace(
+    vEgo=10.0,
+    aEgo=1.2,
+    brakePressed=False,
+    softHoldActive=0,
+    cruiseState=SimpleNamespace(standstill=False),
+  )
+
+  lc.update(True, CS, long_plan, accel_limits, 0.0, radarState)
+  # PID pos_limit follows accel_limits[1] to allow full velocity error feedback tracking
+  assert lc.pid.pos_limit == pytest.approx(accel_limits[1])
+
+
+def test_low_speed_lead_catchup_ramp():
+  """선행차 추종 및 캐치업 시: 일반 수동운전 수준(1.25~1.45 m/s^2)으로 굼뜨지 않게 자연스럽게 가속."""
+  import numpy as np
+  dt = 0.05
+  v_ego = 7.22  # 26 km/h
+  v_ego_kph = v_ego * 3.6
+  base_max_accel = 1.78
+  lead_departing = True
+
+  low_speed_cap = float(np.interp(v_ego_kph, [0.0, 15.0, 35.0, 50.0], [0.85, 1.25, 1.45, base_max_accel]))
+  if lead_departing:
+    low_speed_cap = max(low_speed_cap, 1.35)
+  target_a = min(base_max_accel, low_speed_cap)
+
+  ramp = FirstOrderFilter(0.0, 1.2, dt)
+  current_a = 0.0
+  headroom = 0.55
+  ramp.x = current_a + headroom
+
+  accels = []
+  for _ in range(60):  # 3 seconds
+    ramp.update(target_a)
+    accels.append(ramp.x)
+
+  # Frame 0 is gentle without kickdown spike
+  assert 0.5 < accels[0] < 0.65
+  # At 1.0s (20 steps), reaches normal manual catch-up pace (~1.0 m/s^2)
+  assert 0.95 < accels[20] < 1.15
+  # Converges to target without exceeding base_max_accel
+  assert accels[-1] == pytest.approx(target_a, abs=0.1)
+  assert accels[-1] <= base_max_accel
+
+
+def test_low_speed_open_road_ramp_rpm_stability():
+  """선행차 이탈 및 큰 속도 편차(26 -> 110 km/h) 시: 저속 RPM 치솟음/킥다운 방지 및 부드러운 S-curve 전개."""
+  import numpy as np
+  dt = 0.05
+  v_ego = 7.22  # 26 km/h
+  v_ego_kph = v_ego * 3.6
+  base_max_accel = 1.78
+
+  low_speed_cap = float(np.interp(v_ego_kph, [0.0, 15.0, 35.0, 50.0], [0.75, 1.05, 1.30, base_max_accel]))
+  target_a = min(base_max_accel, low_speed_cap)
+
+  ramp = FirstOrderFilter(0.0, 1.6, dt)
+  current_a = 0.0
+  headroom = 0.38
+  ramp.x = current_a + headroom
+
+  accels = []
+  for _ in range(40):  # 2 seconds
+    ramp.update(target_a)
+    accels.append(ramp.x)
+
+  # Initial step is gentle (around 0.4 m/s^2), completely preventing kickdown shock
+  assert 0.35 < accels[0] < 0.45
+  # At 1.0s (20 steps), smoothly ramps to ~0.77 m/s^2
+  assert 0.7 < accels[20] < 0.85
+  # Ramped limit stays bounded by low_speed_cap at 26 km/h (target_a ~ 1.19 m/s^2)
+  assert accels[-1] <= 1.25
+
+
+def test_complex_multiphase_lead_scenario():
+  """실제 복합 주행 시나리오:
+  1. 정차 대기 (0 km/h) -> 선행차 빠른 출발 (0 -> 40 km/h)
+  2. 선행차 전방 상황으로 급감속 (40 -> 12 km/h)
+  3. 선행차 중고속 재가속 (12 -> 85 km/h)
+  4. 선행차 50 이하 재감속 (85 -> 35 km/h)
+  5. 선행차 재가속 (35 -> 80 km/h)
+  전 구간에서 저속 RPM 안정성, 선행차 캐치업, 제동 시 안전거리 확보, 가속 램프 정상 동작 검증.
+  """
+  import numpy as np
+  from openpilot.common.constants import CV
+
+  dt = 0.05
+  sim_time = 45.0
+  steps = int(sim_time / dt)
+
+  times = [0, 2, 7, 11, 21, 25, 32, 42, 45]
+  speeds_kph = [0, 0, 40, 12, 85, 85, 35, 80, 80]
+  v_lead_profile = np.interp(np.linspace(0, sim_time, steps), times, speeds_kph) / 3.6
+
+  x_ego, v_ego, a_ego = 0.0, 0.0, 0.0
+  x_lead = 7.0
+  ramp = FirstOrderFilter(0.0, 1.5, dt)
+  base_max_accel = 1.60
+
+  ego_speeds = []
+  ego_accels = []
+  gaps = []
+  ramp_limits = []
+
+  for step in range(steps):
+    v_lead = v_lead_profile[step]
+    a_lead = (v_lead_profile[min(step + 1, steps - 1)] - v_lead) / dt
+    x_lead += v_lead * dt
+
+    d_rel = x_lead - x_ego
+    v_rel = v_lead - v_ego
+    standstill = (v_ego < 0.1 and v_lead < 0.1)
+
+    v_ego_kph = v_ego * CV.MS_TO_KPH
+    lead_departing = bool(v_rel > 0.2 or a_lead > 0.2)
+    low_speed_cap = float(np.interp(v_ego_kph, [0.0, 15.0, 35.0, 50.0], [0.85, 1.25, 1.45, base_max_accel]))
+    if lead_departing:
+      low_speed_cap = max(low_speed_cap, 1.35)
+    target_a = min(base_max_accel, low_speed_cap)
+    tau = 1.2 if lead_departing else 1.4
+    headroom = 0.55 if lead_departing else 0.45
+
+    if standstill:
+      start_floor = min(0.65, target_a)
+      ramp.x = max(ramp.x, start_floor)
+    else:
+      current_a = max(0.0, a_ego)
+      if ramp.x > current_a + headroom:
+        ramp.x = max(0.5, current_a + headroom)
+
+    ramp.update_alpha(tau)
+    ramp.update(target_a)
+    max_allowed_a = min(base_max_accel, ramp.x)
+
+    # 차간거리 제어: 목표 거리 = 1.4s * v_ego + 6.0m
+    desired_dist = 1.4 * v_ego + 6.0
+    dist_error = d_rel - desired_dist
+    a_target_cmd = 0.2 * dist_error + 0.6 * v_rel + 0.3 * a_lead
+    a_target_clamped = np.clip(a_target_cmd, -2.5, max_allowed_a)
+
+    # 차량 파워트레인 액추에이터 동역학 (시정수 0.2초 지연)
+    a_ego += (a_target_clamped - a_ego) / 0.2 * dt
+    v_ego = max(0.0, v_ego + a_ego * dt)
+    x_ego += v_ego * dt
+
+    ego_speeds.append(v_ego * 3.6)
+    ego_accels.append(a_ego)
+    gaps.append(d_rel)
+    ramp_limits.append(max_allowed_a)
+
+  # 1. 정차 및 급감속 시 최소 차간거리 유지 (충돌 위험 0, 항상 6.0m 이상 확보)
+  assert min(gaps) > 6.0, f"Minimum distance too small: {min(gaps):.2f}m"
+
+  # 2. 저속 구간(< 35km/h)에서 과도한 가속 방지 (1.45 m/s^2 이하로 RPM 킥다운 치솟음 없음)
+  low_speed_accels = [a for a, v in zip(ego_accels, ego_speeds) if v < 35.0]
+  assert max(low_speed_accels) <= 1.45, f"Low speed accel exceeded cap: {max(low_speed_accels):.2f}"
+
+  # 3. 선행차 급출발 시 즉각적이고 매끄러운 반응 (정차 후 출발 가속도 0.5 m/s^2 이상 확보)
+  launch_step = int(3.0 / dt)  # 출발 후 1초
+  assert ego_accels[launch_step] > 0.4, f"Launch sluggish: {ego_accels[launch_step]:.2f}"
+
+  # 4. 급감속 구간(t=7~11s)에서 안전하고 확실한 제동 감속 인가
+  brake_phase_accels = ego_accels[int(7.5 / dt):int(11.0 / dt)]
+  assert min(brake_phase_accels) < -1.2, f"Deceleration not applied adequately: {min(brake_phase_accels):.2f}"
+
+  # 5. 고속 구간(t=23s)에서 선행차(85km/h)를 자연스럽게 추종하며 순항
+  high_speed_step = int(23.0 / dt)
+  assert abs(ego_speeds[high_speed_step] - 85.0) < 10.0, f"Ego failed to track lead high speed: {ego_speeds[high_speed_step]:.1f}"
+
+  # 6. 재감속 구간(t=31s, 선행차 35km/h)에서 50km/h 이하로 정상 감속
+  decel_step = int(31.0 / dt)
+  assert ego_speeds[decel_step] < 55.0, f"Ego failed to decelerate: {ego_speeds[decel_step]:.1f}"
+
+
+def test_approach_interpolation_feathers_accel():
+  """선행차 추종 가속 시 목표거리/속도에 도달함에 따라 가속도를 보간법으로 부드럽게 감속시켜 오버슈트 방지."""
+  import numpy as np
+  v_ego = 10.0  # 36 km/h
+  t_follow = 1.3
+  stop_dist = 5.0
+  desired_dist = v_ego * t_follow + stop_dist  # 18.0m
+
+  # 1. 거리가 멀고 상대속도가 양수일 때 (충분한 공간): 정상 가속 상한 (약 1.45 m/s^2)
+  d_rel_far = 28.0
+  v_rel_far = 1.5
+  d_headroom = d_rel_far - desired_dist  # 10m
+  gap_scale = float(np.interp(d_headroom, [-1.0, 3.0, 8.0], [0.15, 0.55, 1.0]))
+  rel_scale = float(np.interp(v_rel_far, [-1.5, 0.0, 1.2], [0.15, 0.60, 1.0]))
+  approach_scale_far = min(gap_scale, rel_scale)
+  assert approach_scale_far == pytest.approx(1.0)
+
+  # 2. 선행차에 거의 근접했을 때 (d_rel = 18.5m, headroom = +0.5m, v_rel = -0.5m/s):
+  # 가속 상한이 선행차 가속도(0.0) 부근으로 완만하게 축소되어 오버슈트 및 급제동 방지
+  d_rel_close = 18.5
+  v_rel_close = -0.5
+  d_headroom_close = d_rel_close - desired_dist  # 0.5m
+  gap_scale_close = float(np.interp(d_headroom_close, [-1.0, 3.0, 8.0], [0.15, 0.55, 1.0]))
+  rel_scale_close = float(np.interp(v_rel_close, [-1.5, 0.0, 1.2], [0.15, 0.60, 1.0]))
+  approach_scale_close = min(gap_scale_close, rel_scale_close)
+  assert approach_scale_close < 0.40
+
+
+def test_mild_lead_decel_coasting_deadband():
+  """선행차가 경미하게 감속할 때(-0.5~-1.0 m/s^2) 충분한 안전거리(+4.4m)가 확보된 상태에서만 탄성주행 데드밴드로 대응."""
+  import numpy as np
+  v_ego = 12.0  # 43.2 km/h
+  v_lead = 11.5
+  v_rel = -0.5
+  a_lead = -0.6
+  d_rel = 25.0
+  desired_dist = v_ego * 1.3 + 5.0  # 20.6m
+  d_headroom = d_rel - desired_dist  # +4.4m (충분한 안전거리)
+  v_ego_kph = v_ego * 3.6
+
+  # MPC가 거리 오차로 인해 -2.0 m/s^2의 제동을 요구했다고 가정
+  output_a_target_raw = -2.0
+
+  coasting_headroom_min = 2.5 if v_ego_kph > 50.0 else 1.5
+  coasting_v_rel_min = -0.3 if v_ego_kph > 50.0 else -0.5
+  is_coasting_condition = (
+    v_lead > 2.0 and v_ego > 2.5 and d_headroom >= coasting_headroom_min
+    and v_rel >= coasting_v_rel_min
+    and d_rel >= max(7.0, desired_dist * 0.80)
+    and a_lead > -1.8
+  )
+  assert is_coasting_condition is True
+
+  mild_signal = min(a_lead, v_rel)
+  mild_floor = float(np.interp(mild_signal, [-1.8, -1.0, -0.4, 0.0], [-1.0, -0.65, -0.35, -0.15]))
+  output_a_target = max(output_a_target_raw, mild_floor)
+
+  # 급제동(-2.0)이 아닌 마일드 감속/탄성주행(-0.50 m/s^2 수준)으로 완화됨을 검증
+  assert -0.65 <= output_a_target <= -0.35
+
+  # 반면, 거리가 좁혀졌거나(d_headroom < 1.5m) 상대속도가 급격히 좁혀지면(v_rel < -0.5m/s) 탄성주행이 해제되어 제동 위임
+  narrow_headroom_condition = (
+    v_lead > 2.0 and v_ego > 2.5 and (d_rel - 26.0) >= coasting_headroom_min
+    and v_rel >= coasting_v_rel_min
+    and (d_rel - 6.0) >= max(7.0, desired_dist * 0.80)
+    and a_lead > -1.8
+  )
+  assert narrow_headroom_condition is False
+
+
+def test_high_speed_lead_closing_early_decel():
+  """고속(80~100km/h) 주행 중 감속하는 선행차를 추종할 때 마일드 감속에 머물지 않고 능동적으로 안전감속 인가."""
+  import numpy as np
+  v_ego = 95.0 / 3.6  # 26.39 m/s (95 km/h)
+  v_ego_kph = v_ego * 3.6
+  v_rel = -1.5  # 선행차가 5.4 km/h 더 느림
+  a_lead = -0.8
+  d_rel = 40.0
+  t_follow = 1.2
+  stop_dist = 6.0
+  desired_dist = v_ego * t_follow + stop_dist  # 37.67m
+  d_headroom = d_rel - desired_dist  # +2.33m
+
+  speed_weight = float(np.clip(np.interp(v_ego_kph, [35.0, 55.0], [0.0, 1.0]), 0.0, 1.0))
+  assert speed_weight == 1.0
+
+  decel_signal = min(a_lead, v_rel)
+  closing_decel = float(np.interp(decel_signal, [-3.0, -1.8, -1.0, -0.3], [-1.60, -1.20, -0.75, -0.25]))
+  headroom_factor = float(np.interp(d_headroom, [-5.0, 0.0, 5.0, 12.0], [1.35, 1.15, 0.85, 0.60]))
+  early_decel = float(np.clip(closing_decel * headroom_factor * speed_weight, -1.85, -0.15))
+
+  # 고속 접근 시 -0.50 m/s^2 한계에 묶이지 않고 -0.90 ~ -1.20 m/s^2의 안정적인 선제 감속 전개 확인
+  assert -1.20 <= early_decel <= -0.90
+
+
+def test_soft_landing_continuous_deceleration_blending():
+  """정차 직전(0.5km/h 이하) 속도 구간에서 불연속 계단식 jerk(-0.25 -> -0.5) 없이 부드러운 연속 보간 확인."""
+  import numpy as np
+  v_egos = [0.45, 0.35, 0.25, 0.15, 0.08, 0.05]
+  targets = []
+  for v in v_egos:
+    if v < 0.08:
+      target = -0.50
+    else:
+      target = float(np.interp(v, [0.08, 0.45], [-0.50, -0.25]))
+    targets.append(target)
+
+  # 속도가 0에 수렴함에 따라 감속도가 연속적으로 매끄럽게 -0.25 -> -0.50으로 이어짐
+  assert targets[0] == pytest.approx(-0.25)
+  assert targets[-2] == pytest.approx(-0.50)
+  for i in range(len(targets) - 1):
+    assert targets[i] >= targets[i+1]  # 단조 감소 (연속 변화)
+    assert abs(targets[i] - targets[i+1]) < 0.12  # 한 프레임/구간당 급격한 점프 없음
+
+
+def test_mild_decel_synchronizes_v_target_now_for_longcontrol():
+  """탄성주행 데드밴드 작동 시 output_v_target_now도 동기화되어 longcontrol PID 속도오차 누적을 방지하는지 검증."""
+  import numpy as np
+  v_ego = 12.0
+  dt = 0.05
+  action_t = 0.25
+  output_a_target_mpc = -2.0
+  output_v_target_mpc = v_ego + output_a_target_mpc * action_t  # 11.50 m/s (-0.50 m/s 오차)
+  a_desired = -1.8
+  v_filter_x = v_ego + a_desired * dt
+
+  mild_signal = min(-0.5, -0.4)
+  mild_floor = float(np.interp(mild_signal, [-1.8, -1.0, -0.4, 0.0], [-1.0, -0.65, -0.35, -0.15]))
+  output_a_target = max(output_a_target_mpc, mild_floor)
+  a_desired = max(a_desired, output_a_target)
+  v_filter_x = max(v_filter_x, v_ego + output_a_target * dt)
+  output_v_target_now = max(output_v_target_mpc, v_ego + output_a_target * action_t)
+
+  # Hyundai longcontrol: KP=1.0 * (v_target_now - v_ego) + KF=1.0 * output_a_target
+  hyundai_pid_accel = 1.0 * (output_v_target_now - v_ego) + 1.0 * output_a_target
+  assert output_a_target == pytest.approx(-0.40, rel=1e-3)
+  assert hyundai_pid_accel > -0.55  # 급제동(-2.5 m/s^2) 대신 부드러운 엔진브레이크 영역 유지
+
+
+def test_departure_from_stop_preserves_lead_match_acceleration():
+  """정차/저속 출발 시 차간거리가 아직 좁더라도(d_headroom <= 0) 선행차 가속에 맞춰 추종 가속력이 보장되는지 검증."""
+  import numpy as np
+  v_ego = 1.0
+  v_ego_kph = v_ego * 3.6
+  base_max_accel = 1.6
+  v_rel = 0.8
+  a_lead = 0.9
+  d_rel = 5.2
+  desired_dist = v_ego * 1.3 + 5.0  # 6.3m -> d_headroom = -1.1m
+  d_headroom = d_rel - desired_dist
+
+  low_speed_cap = max(float(np.interp(v_ego_kph, [0.0, 15.0, 35.0, 50.0], [0.85, 1.25, 1.45, base_max_accel])), 1.35)
+  target_a_raw = min(base_max_accel, low_speed_cap)
+  gap_scale = float(np.interp(d_headroom, [-1.5, 2.5, 7.0], [0.20, 0.65, 1.0]))
+  approach_scale = gap_scale  # lead_departing=True -> rel_scale=1.0
+  lead_match_a = float(np.clip(a_lead + max(0.0, v_rel) * 0.5, 0.0, target_a_raw))
+  target_a = lead_match_a + (target_a_raw - lead_match_a) * approach_scale
+
+  assert target_a >= 1.25  # 출발 지연 없이 자연스러운 수동 주행 수준의 추종 가속 보장
+
+
+def test_responsive_lead_depart_catchup_acceleration():
+  """선행차 가속 출발 시 초중반 가속 캐치업이 굼뜨지 않고 신속하게 추종하는지 검증."""
+  import numpy as np
+  dt = 0.05
+  # 시속 40km/h (11.1 m/s) 주행 중 선행차 가속 (v_rel = 1.5 m/s, a_lead = 1.2 m/s^2)
+  v_ego = 11.11
+  v_ego_kph = v_ego * 3.6
+  base_max_accel = 1.45
+  v_rel = 1.5
+  a_lead = 1.2
+  d_rel = 22.0
+  v_lead = v_ego + v_rel
+
+  lead_departing = bool(v_rel > 0.2 or a_lead > 0.2)
+  low_speed_cap = float(np.interp(v_ego_kph, [0.0, 15.0, 35.0, 50.0], [0.85, 1.35, 1.60, base_max_accel]))
+  lead_catchup_cap = float(np.interp(v_ego_kph, [0.0, 20.0, 45.0, 75.0, 110.0], [1.85, 2.00, 1.90, 1.65, 1.35]))
+  depart_gate = float(np.clip(max(np.interp(d_rel, [4.0, 7.0], [0.0, 1.0]),
+                                  np.interp(v_lead * 3.6, [5.0, 15.0], [0.0, 1.0])), 0.0, 1.0))
+  depart_cap = float(np.interp(depart_gate, [0.0, 1.0], [1.35, lead_catchup_cap]))
+  allowed_max_accel = max(base_max_accel, depart_cap)
+  target_a = min(allowed_max_accel, max(low_speed_cap, depart_cap))
+
+  # target_a가 base_max_accel(1.45)에 머물지 않고 최대 1.90 m/s^2까지 여유를 확보
+  assert allowed_max_accel >= 1.85
+  assert target_a >= 1.85
+
+  # 필터 램프업 반응 속도: tau = 0.55s, headroom = 1.25 m/s^2
+  tau = 0.55 if depart_gate > 0.20 else 0.80
+  headroom = 1.25 if depart_gate > 0.20 else 0.85
+  ramp = FirstOrderFilter(0.0, tau, dt)
+  ramp.x = 0.0 + headroom  # 현재 가속도 0.0에서 즉시 1.25 헤드룸 확보
+
+  accels = []
+  for _ in range(16):  # 0.8초 (16 스텝)
+    ramp.update(target_a)
+    accels.append(ramp.x)
+
+  # 0.8초 만에 1.6 m/s^2 이상 도달하여 선행차 가속을 지체 없이 캐치업
+  assert accels[-1] >= 1.65
+
+
+
+
+

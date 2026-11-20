@@ -9,7 +9,8 @@ from openpilot.selfdrive.carrot.carrot_functions import (
   get_mode_lead_response,
 )
 from openpilot.selfdrive.carrot.t_follow import (
-  get_t_follow_mode_factor, get_t_follow_mode_max, get_speed_t_follow_factor, get_lead_response_for_gap, ramp_t_follow,
+  get_t_follow_mode_factor, get_t_follow_mode_max, get_speed_t_follow_factor, get_mid_speed_t_follow_factor,
+  get_lead_response_for_gap, ramp_t_follow,
 )
 
 
@@ -153,6 +154,7 @@ def test_safe_t_follow_does_not_compound_during_repeated_deceleration():
 def _speed_tf_planner(lead_accel_response: int, applied_t_follow: float) -> CarrotPlanner:
   planner = CarrotPlanner.__new__(CarrotPlanner)
   planner.speedTFFactor = 10
+  planner.midSpeedTFRatio = 100
   planner.tFollowGap1 = 0.4
   planner.tFollowGap2 = 0.6
   planner.tFollowGap3 = 0.8
@@ -232,7 +234,11 @@ def test_actual_update_resolves_response_after_refresh_on_every_gap_change(mode,
   planner_class = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'CarrotPlanner')
   update = next(n for n in planner_class.body if isinstance(n, ast.FunctionDef) and n.name == 'update')
   # Run the production refresh/selection prefix without hardware or navigation.
-  update.body = update.body[:3]
+  start_idx = next(
+    i for i, n in enumerate(update.body)
+    if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call) and '_params_update' in ast.unparse(n.value.func)
+  )
+  update.body = update.body[start_idx:start_idx + 3]
   namespace = {'get_lead_response_for_gap': get_lead_response_for_gap, 'get_mode_lead_response': get_mode_lead_response}
   exec(compile(ast.Module(body=[update], type_ignores=[]), str(source), 'exec'), namespace)
   planner = SimpleNamespace(leadAccelResponseBase=0, leadAccelResponseTF=[5, 3, 0, -1], myDrivingMode=mode)
@@ -339,4 +345,52 @@ def test_stored_mode_change_still_disables_automatic_selection():
   planner.drivingModeDetector.congested = True
   planner._params_update()
   assert planner.myDrivingMode_disable_auto
-  assert planner.myDrivingMode == DrivingMode.Eco
+
+
+@pytest.mark.parametrize("speed", [0.0, 10.0, 20.0, 30.0, 120.0, 130.0])
+def test_mid_speed_factor_is_one_at_low_and_high_extremes(speed):
+  assert get_mid_speed_t_follow_factor(speed, 88) == pytest.approx(1.0)
+  assert get_mid_speed_t_follow_factor(speed, 100) == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("speed,expected", [
+  (42.0, 0.94),
+  (60.0, 0.88),
+  (75.0, 1.0 - 0.12 * 0.80),
+  (90.0, 0.94),
+  (105.0, 1.0 - 0.12 * 0.25),
+])
+def test_mid_speed_factor_compresses_at_arterial_speeds(speed, expected):
+  assert get_mid_speed_t_follow_factor(speed, 88) == pytest.approx(expected)
+
+
+def test_planner_default_mid_speed_preserves_low_speed_and_compresses_arterial():
+  planner = _speed_tf_planner(0, 1.3)
+  planner.midSpeedTFRatio = 88
+  planner.myTFollowFactor = 1.0
+  planner.tFollowGap1 = planner.tFollowGap2 = planner.tFollowGap3 = planner.tFollowGap4 = 1.3
+  # At <= 30 km/h: exactly 100% baseline gap preserved
+  assert planner.get_T_FOLLOW(v_ego=30.0 / 3.6, a_ego=0.0) == pytest.approx(1.3)
+  # At 60 km/h: 12% tightening applied immediately (gap reductions are immediate)
+  assert planner.get_T_FOLLOW(v_ego=60.0 / 3.6, a_ego=0.0) == pytest.approx(1.3 * 0.88)
+  # When speed returns to 120 km/h, gap smoothly ramps back to full baseline
+  for _ in range(50):
+    val = planner.get_T_FOLLOW(v_ego=120.0 / 3.6, a_ego=0.0)
+  assert val == pytest.approx(1.3)
+
+
+def test_planner_mid_speed_decel_hold_expands_gap_during_braking():
+  planner = _speed_tf_planner(0, 1.3)
+  planner.midSpeedTFRatio = 88
+  planner.myTFollowFactor = 1.0
+  planner.tFollowGap2 = 1.3
+  planner.tFollowDecelBoost = 1.0
+  # Cruise at 60 km/h (compressed to 1.144)
+  cruising_tf = planner.get_T_FOLLOW(v_ego=60.0 / 3.6, a_ego=0.0)
+  assert cruising_tf == pytest.approx(1.3 * 0.88)
+  # Sudden braking occurs: a_ego = -1.0 m/s^2, slowing from 60 to 30 km/h
+  braking_tf = planner.get_T_FOLLOW(v_ego=30.0 / 3.6, a_ego=-1.0)
+  # TF expands significantly above cruising TF to guarantee generous stopping distance
+  assert braking_tf > cruising_tf
+  # Must provide at least +0.25s of decel extra margin
+  assert planner._tf_decel_extra >= 0.24

@@ -21,7 +21,10 @@ from openpilot.selfdrive.carrot.radar_motion.lane_change_gap import LaneChangeGa
 if __name__ == '__main__':  # generating code
   from acados.acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
 else:
-  from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.c_generated_code.acados_ocp_solver_pyx import AcadosOcpSolverCython
+  try:
+    from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.c_generated_code.acados_ocp_solver_pyx import AcadosOcpSolverCython
+  except ImportError:
+    AcadosOcpSolverCython = None
 
 from casadi import SX, vertcat
 

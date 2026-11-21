@@ -9,6 +9,7 @@ from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.selfdrive.locationd.calibrationd import HEIGHT_INIT
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.selfdrive.ui.onroad.view_3d_scene import View3dScene, C4_SIZES
+from openpilot.selfdrive.ui.onroad.view_vr_scene import ViewVrScene
 from openpilot.selfdrive.ui.vision_status import blindspot_source_packet, blindspot_sources
 from openpilot.selfdrive.ui.road_markings import lane_dash_segments, project_blindspot_barrier, blindspot_barrier_quads
 from openpilot.selfdrive.ui.mici.onroad import blend_colors
@@ -96,6 +97,7 @@ class ModelRenderer(Widget):
     self._acceleration_x_filter = FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps)
     self._acceleration_x_filter2 = FirstOrderFilter(0.0, 1, 1 / gui_app.target_fps)
 
+    self._view_mode: int = 0
     self._view_3d_mode: bool = False
     self._view_3d_is_night: bool = True
 
@@ -126,8 +128,14 @@ class ModelRenderer(Widget):
     self._car_space_transform = transform.astype(np.float32)
     self._transform_dirty = True
 
+  def set_view_mode(self, mode: int, is_night: bool = True) -> None:
+    self._view_mode = int(mode) % 3
+    self._view_3d_mode = self._view_mode == 1
+    self._view_3d_is_night = is_night
+
   def set_view_3d_mode(self, enabled: bool, is_night: bool = True) -> None:
-    self._view_3d_mode = enabled
+    self._view_mode = 1 if enabled else 0
+    self._view_3d_mode = bool(enabled)
     self._view_3d_is_night = is_night
 
   set_fsd_mode = set_view_3d_mode
@@ -206,6 +214,10 @@ class ModelRenderer(Widget):
         self._radar_info_items = []
         
       self._transform_dirty = False
+
+    if getattr(self, '_view_mode', 0) == 2:
+      self._draw_vr_view_visualization(sm)
+      return
 
     # AR View and 3D View share all elements, while 3D view replaces lead box with 3D sedan graphic
     self._draw_lane_lines()
@@ -792,5 +804,14 @@ class ModelRenderer(Widget):
       self._view_3d_scene = View3dScene(C4_SIZES)
     is_night = getattr(self, '_view_3d_is_night', getattr(self, '_fsd_is_night', True))
     self._view_3d_scene.draw(self, sm, self._rect, is_night)
+
+  def _draw_vr_view_visualization(self, sm):
+    """VR view: 3rd-person chase-camera driving visualization."""
+    if not sm.valid['modelV2']:
+      return
+    if not hasattr(self, '_view_vr_scene'):
+      self._view_vr_scene = ViewVrScene(is_compact=True)
+    is_night = getattr(self, '_view_3d_is_night', getattr(self, '_fsd_is_night', True))
+    self._view_vr_scene.draw(self, sm, self._rect, is_night)
 
   _draw_fsd_visualization = _draw_3d_view_visualization

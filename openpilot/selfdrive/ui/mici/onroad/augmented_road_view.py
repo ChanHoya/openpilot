@@ -305,11 +305,17 @@ class AugmentedRoadView(CameraView):
 
     road_view_mode = self._road_view_mode()
     btn = getattr(self, '_view_3d_button', getattr(self, '_fsd_button', None))
+    view_mode = getattr(btn, 'view_mode', 1 if getattr(btn, 'view_3d_mode', False) else 0) if btn is not None else 0
     is_view_3d = getattr(btn, 'view_3d_mode', getattr(btn, 'fsd_mode', False)) if btn is not None else False
+    is_vr = view_mode == 2
+    is_virtual = is_view_3d or is_vr
     is_night = self.is_view_3d_night_mode() if hasattr(self, 'is_view_3d_night_mode') else True
     _t = time.monotonic()
     if self._suppress_camera_for_cluster or road_view_mode in (2, 3):
       rl.draw_rectangle_rec(self._content_rect, rl.BLACK)
+    elif is_vr:
+      from openpilot.selfdrive.ui.onroad.view_vr_scene import draw_vr_background
+      draw_vr_background(self._content_rect, is_night)
     elif is_view_3d:
       self._render_3d_view_background(self._content_rect, is_night)
     else:
@@ -321,7 +327,9 @@ class AugmentedRoadView(CameraView):
 
     if not self._suppress_camera_for_cluster and road_view_mode in (0, 2):
       # Draw all UI overlays
-      if hasattr(self._model_renderer, 'set_view_3d_mode'):
+      if hasattr(self._model_renderer, 'set_view_mode'):
+        self._model_renderer.set_view_mode(view_mode, is_night)
+      elif hasattr(self._model_renderer, 'set_view_3d_mode'):
         self._model_renderer.set_view_3d_mode(is_view_3d, is_night)
       elif hasattr(self._model_renderer, 'set_fsd_mode'):
         self._model_renderer.set_fsd_mode(is_view_3d, is_night)
@@ -329,8 +337,8 @@ class AugmentedRoadView(CameraView):
       timing.call('model', self._model_renderer.render, self._content_rect)
       model_ms = (time.monotonic() - _t) * 1000.0
 
-    if not self._suppress_camera_for_cluster and not is_view_3d:
-      # Fade out bottom of overlays for looks (not needed in pure FSD view)
+    if not self._suppress_camera_for_cluster and not is_virtual:
+      # Fade out bottom of overlays for looks (not needed in pure FSD/VR view)
       _t = time.monotonic()
       rl.draw_texture_ex(self._fade_texture, rl.Vector2(self._content_rect.x, self._content_rect.y), 0.0, 1.0, rl.WHITE)
       extras_ms += (time.monotonic() - _t) * 1000.0
@@ -343,9 +351,9 @@ class AugmentedRoadView(CameraView):
     self._hud_renderer.set_wheel_critical_icon(alert_to_render is not None and not not_animating_out and
                                                alert_to_render.visual_alert == car.CarControl.HUDControl.VisualAlert.steerRequired)
     if hasattr(self._hud_renderer, 'set_view_3d_theme'):
-      self._hud_renderer.set_view_3d_theme(is_view_3d, is_night)
+      self._hud_renderer.set_view_3d_theme(is_virtual, is_night)
     elif hasattr(self._hud_renderer, 'set_fsd_theme'):
-      self._hud_renderer.set_fsd_theme(is_view_3d, is_night)
+      self._hud_renderer.set_fsd_theme(is_virtual, is_night)
     # TODO: have alert renderer draw offroad mici label below
     _t = time.monotonic()
     self._hud_renderer.render(self._content_rect)

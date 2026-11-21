@@ -113,6 +113,7 @@ class UIState:
     # Brightness and UI options
     self.show_brightness_ratio: float = 1.0
     self.show_model_view: int = 0
+    self.view_mode: int = 0
     self.view_3d_mode: bool = False
     self.fsd_view_mode: bool = False
     self.share_data: bool = False
@@ -231,6 +232,11 @@ class UIState:
     self.show_radar_info = self.params.get_int("ShowRadarInfo")
     self.show_brightness_ratio: float = self.params.get_int("ShowCustomBrightness") / 100.0
     self.show_model_view = self.params.get_int("ShowModelView")
+    vm = None
+    try:
+      vm = int(self.params.get_int("ViewMode"))
+    except Exception:
+      vm = None
     v3d = None
     for key in ("View3dMode", "FsdViewMode"):
       try:
@@ -238,7 +244,13 @@ class UIState:
         break
       except Exception:
         continue
-    self.view_3d_mode = bool(v3d)
+    if vm is not None and vm in (0, 1, 2):
+      if vm == 0 and v3d:
+        vm = 1
+      self.view_mode = vm
+    else:
+      self.view_mode = 1 if v3d else 0
+    self.view_3d_mode = self.view_mode == 1
     self.fsd_view_mode = self.view_3d_mode
     self.share_data = self.params.get_bool("ShareData")
     self.show_camera_with_cluster = self.params.get_int("ShowCameraWithCluster") == 1

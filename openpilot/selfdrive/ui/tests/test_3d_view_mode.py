@@ -27,19 +27,30 @@ def mock_gui_app(monkeypatch):
 
 
 class FakeParams:
-  def __init__(self, initial=False, unknown_keys=()):
-    self.data = {"View3dMode": initial, "FsdViewMode": initial}
+  def __init__(self, initial=False, unknown_keys=(), initial_view_mode=None):
+    vm = initial_view_mode if initial_view_mode is not None else (1 if initial else 0)
+    self.data = {"ViewMode": vm, "View3dMode": vm == 1, "FsdViewMode": vm == 1}
     self.unknown_keys = set(unknown_keys)
 
   def get_bool(self, key):
     if key in self.unknown_keys:
       raise KeyError(f"Unknown param key: {key}")
-    return self.data.get(key, False)
+    return bool(self.data.get(key, False))
 
   def put_bool(self, key, val):
     if key in self.unknown_keys:
       raise KeyError(f"Unknown param key: {key}")
     self.data[key] = bool(val)
+
+  def get_int(self, key):
+    if key in self.unknown_keys:
+      raise KeyError(f"Unknown param key: {key}")
+    return int(self.data.get(key, 0))
+
+  def put_int(self, key, val):
+    if key in self.unknown_keys:
+      raise KeyError(f"Unknown param key: {key}")
+    self.data[key] = int(val)
 
 
 def test_view_3d_button_toggle(monkeypatch):
@@ -47,39 +58,70 @@ def test_view_3d_button_toggle(monkeypatch):
   monkeypatch.setattr("openpilot.selfdrive.ui.onroad.view_3d_button.Params", lambda: fake_params)
 
   btn = View3dButton(width=150, height=68)
+  assert btn.view_mode == 0
   assert btn.view_3d_mode is False
+  assert btn.vr_mode is False
+  assert btn.is_virtual_mode is False
   assert btn.fsd_mode is False
 
+  # 1st tap: AR (0) -> 3D (1)
   btn._handle_mouse_release(None)
+  assert btn.view_mode == 1
   assert btn.view_3d_mode is True
+  assert btn.vr_mode is False
+  assert btn.is_virtual_mode is True
   assert btn.fsd_mode is True
+  assert fake_params.get_int("ViewMode") == 1
   assert fake_params.get_bool("View3dMode") is True
   assert fake_params.get_bool("FsdViewMode") is True
 
+  # 2nd tap: 3D (1) -> VR (2)
   btn._handle_mouse_release(None)
+  assert btn.view_mode == 2
   assert btn.view_3d_mode is False
+  assert btn.vr_mode is True
+  assert btn.is_virtual_mode is True
   assert btn.fsd_mode is False
+  assert fake_params.get_int("ViewMode") == 2
   assert fake_params.get_bool("View3dMode") is False
   assert fake_params.get_bool("FsdViewMode") is False
 
+  # 3rd tap: VR (2) -> AR (0)
+  btn._handle_mouse_release(None)
+  assert btn.view_mode == 0
+  assert btn.view_3d_mode is False
+  assert btn.vr_mode is False
+  assert btn.is_virtual_mode is False
+  assert fake_params.get_int("ViewMode") == 0
+
 
 def test_view_3d_button_persists_ar_mode_after_1s_refresh(monkeypatch):
-  # Simulate device running without recompiled View3dMode in Cython params_pyx.
-  fake_params = FakeParams(initial=True, unknown_keys={"View3dMode"})
+  # Simulate device running without recompiled ViewMode/View3dMode in Cython params_pyx.
+  fake_params = FakeParams(initial=True, unknown_keys={"ViewMode", "View3dMode"})
   monkeypatch.setattr("openpilot.selfdrive.ui.onroad.view_3d_button.Params", lambda: fake_params)
   now = [10.0]
   monkeypatch.setattr("openpilot.selfdrive.ui.onroad.view_3d_button.time.monotonic", lambda: now[0])
 
   btn = View3dButton(width=150, height=68)
+  assert btn.view_mode == 1
   assert btn.view_3d_mode is True
 
+  # Tap once -> VR (2); after 1.5s _render refresh, VR must NOT snap back to AR/3D.
   btn._handle_mouse_release(None)
-  assert btn.view_3d_mode is False
-  assert fake_params.get_bool("FsdViewMode") is False
-
-  # After 1.5s _render triggers periodic param sync: AR view must NOT snap back to 3D view.
+  assert btn.view_mode == 2
+  assert btn.vr_mode is True
   now[0] = 11.5
   btn._render(rl.Rectangle(0, 0, 150, 68))
+  assert btn.view_mode == 2
+  assert btn.vr_mode is True
+
+  # Tap again -> AR (0); after 1.5s _render refresh, AR stays AR.
+  btn._handle_mouse_release(None)
+  assert btn.view_mode == 0
+  assert fake_params.get_bool("FsdViewMode") is False
+  now[0] = 13.5
+  btn._render(rl.Rectangle(0, 0, 150, 68))
+  assert btn.view_mode == 0
   assert btn.view_3d_mode is False
   assert fake_params.get_bool("FsdViewMode") is False
 
@@ -1239,4 +1281,126 @@ def test_lead_distance_calibration_and_tf_bar_display(monkeypatch):
   renderer._update_path_end_carrot(sm)
   assert renderer._carrot_vision_dist == pytest.approx(10.0)
   assert renderer._carrot_lead_dist_m == pytest.approx(10.0)
+
+
+def test_vr_ego_car_png_asset_exists():
+  from pathlib import Path
+  from PIL import Image
+  p = Path(__file__).resolve().parents[2] / "assets" / "images" / "ego_car.png"
+  assert p.exists(), f"missing asset {p}"
+  im = Image.open(p)
+  assert im.mode == "RGBA"
+  assert im.width >= 400 and im.height >= 400
+  assert im.getpixel((0, 0))[3] == 0
+  # Center trunk/body area must be completely opaque
+  assert im.getpixel((im.width // 2, im.height // 2))[3] == 255
+
+
+def test_vr_track_manager_filters_clutter_keeps_stopped_lead_and_damps_jitter():
+  from openpilot.selfdrive.ui.onroad.view_vr_tracks import VrTrackManager
+
+  mgr = VrTrackManager()
+  xs = np.linspace(0.0, 100.0, 33)
+  path = np.stack((xs, np.zeros_like(xs), np.zeros_like(xs)), axis=1).astype(np.float32)
+  road_edges = [
+    SimpleNamespace(raw_points=np.stack((xs, np.full_like(xs, -5.8), np.zeros_like(xs)), axis=1).astype(np.float32)),
+    SimpleNamespace(raw_points=np.stack((xs, np.full_like(xs, 5.8), np.zeros_like(xs)), axis=1).astype(np.float32)),
+  ]
+  stds = np.array([0.4, 0.4], dtype=np.float32)
+
+  # Frame 0: stopped L1 (status=True, vLead=0), stationary guardrail point in left lane, off-road pole, and moving right-lane car (vAbs=20 m/s)
+  sm = FakeSubMaster(
+    radarState=SimpleNamespace(
+      leadOne=SimpleNamespace(status=True, dRel=22.0, yRel=0.0, vRel=-15.0, vLeadK=0.0, aLead=0.0, radarTrackId=11),
+      leadTwo=None,
+      leadsLeft=[],
+      leadsRight=[],
+    ),
+    liveTracks=SimpleNamespace(
+      hasDisplayData=False,
+      points=[
+        # Stopped L1 duplicate -> deduped against L1
+        SimpleNamespace(trackId=11, dRel=22.1, yRel=0.1, vRel=-15.0, vLead=0.0, measured=True),
+        # Stationary guardrail inside lane bounds (vLead=0.4 m/s < 2.2 m/s) -> rejected!
+        SimpleNamespace(trackId=101, dRel=35.0, yRel=3.5, vRel=-14.6, vLead=0.4, measured=True),
+        # Moving sign/car outside right edge (yRel=-8.5 -> y_dev=+8.5 > 5.8+1.35) -> rejected!
+        SimpleNamespace(trackId=102, dRel=40.0, yRel=-8.5, vRel=5.0, vLead=20.0, measured=True),
+        # Real moving adjacent car in right lane (yRel=-3.5 -> y_dev=+3.5, vLead=20.0)
+        SimpleNamespace(trackId=201, dRel=30.0, yRel=-3.5, vRel=5.0, vLead=20.0, measured=True),
+      ],
+    ),
+  )
+
+  # Frame 0: stopped L1 immediately confirmed; single-hit ADJ waits for 2nd confirmation hit
+  out0 = mgr.update(sm, v_ego=15.0, path=path, road_edges=road_edges, road_edge_stds=stds, dt=0.05, now_t=10.00)
+  assert [v.tag for v in out0] == ['L1']
+
+  # Frame 1 (0.05s later): adjacent car gets 2nd hit -> confirmed (starts fade-in); guardrail & outside sign stay rejected
+  out1 = mgr.update(sm, v_ego=15.0, path=path, road_edges=road_edges, road_edge_stds=stds, dt=0.05, now_t=10.05)
+  assert sorted(v.tag for v in out1) == ['ADJ', 'L1']
+  adj = next(v for v in out1 if v.tag == 'ADJ')
+  assert adj.y_dev == pytest.approx(3.5)
+  assert 0.15 <= adj.opacity <= 0.35
+
+  # Spike lateral noise +2.0m on ADJ in a single 50ms frame -> slew-rate cap + EMA limits jump < 0.15m!
+  sm['liveTracks'].points[3] = SimpleNamespace(trackId=201, dRel=30.5, yRel=-5.5, vRel=5.0, vLead=20.0, measured=True)
+  out2 = mgr.update(sm, v_ego=15.0, path=path, road_edges=road_edges, road_edge_stds=stds, dt=0.05, now_t=10.10)
+  adj2 = next(v for v in out2 if v.tag == 'ADJ')
+  assert abs(adj2.y_dev - adj.y_dev) < 0.15
+  assert adj2.opacity > adj.opacity
+
+  # Drop ADJ detection -> smoothly coasts at held opacity on 1st missed frame, then fades out completely
+  sm['liveTracks'].points = []
+  out3 = mgr.update(sm, v_ego=15.0, path=path, road_edges=road_edges, road_edge_stds=stds, dt=0.05, now_t=10.15)
+  assert any(v.tag == 'ADJ' and v.opacity == pytest.approx(adj2.opacity) for v in out3)
+  out4 = mgr.update(sm, v_ego=15.0, path=path, road_edges=road_edges, road_edge_stds=stds, dt=0.45, now_t=10.65)
+  assert all(v.tag != 'ADJ' for v in out4)
+
+
+def test_vr_scene_and_model_renderers_day_and_night(monkeypatch):
+  from openpilot.selfdrive.ui.onroad import view_vr_scene, view_3d_scene, view_3d_draw
+  from openpilot.selfdrive.ui.onroad.view_vr_scene import ViewVrScene, draw_vr_background
+  from openpilot.selfdrive.ui.mici.onroad.model_renderer import ModelRenderer as MiciModelRenderer
+
+  polys = []
+  monkeypatch.setattr(view_vr_scene, "draw_polygon_solid", lambda pts, col: polys.append(pts))
+  monkeypatch.setattr(view_vr_scene, "measure_text_cached", lambda font, text, size: rl.Vector2(len(str(text)) * 10, 30))
+  monkeypatch.setattr(view_3d_scene, "draw_polygon_solid", lambda pts, col: None)
+  cars = []
+  monkeypatch.setattr(view_3d_draw, "draw_vehicle_rear", lambda *a, style='lead', **k: cars.append(style))
+
+  renderer = _scene_renderer(curve_y=1.8)
+  sm = FakeSubMaster(
+    carState=SimpleNamespace(vEgo=20.0, aEgo=-0.8, brakeLights=True, brakePressed=False,
+                             leftBlinker=False, rightBlinker=True, leftBlindspot=False, rightBlindspot=True),
+    selfdriveState=SimpleNamespace(enabled=True),
+    longitudinalPlan=SimpleNamespace(trafficState=1, xState='e2eStop'),
+    radarState=SimpleNamespace(
+      leadOne=SimpleNamespace(status=True, dRel=22.8, yRel=0.0, vRel=-1.5, vLeadK=18.5, aLead=-0.7, radarTrackId=1),
+      leadTwo=SimpleNamespace(status=True, dRel=48.0, yRel=0.0, vRel=-0.5, vLeadK=19.5, aLead=0.0, radarTrackId=2),
+      leadsLeft=[SimpleNamespace(status=True, dRel=28.0, yRel=3.5, vRel=1.0, vLeadK=21.0, aLead=0.0, radarTrackId=3)],
+      leadsRight=[],
+    ),
+    liveTracks=SimpleNamespace(hasDisplayData=False, points=[]),
+  )
+
+  scene = ViewVrScene(is_compact=False)
+  for is_night in (False, True):
+    draw_vr_background(C3_RECT, is_night)
+    scene.draw(renderer, sm, C3_RECT, is_night=is_night, now=10.0)
+    scene.draw(renderer, sm, C3_RECT, is_night=is_night, now=10.05)
+
+  assert len(polys) > 0
+  assert 'lead' in cars and 'lead_two' in cars and 'adj' in cars
+
+  c3 = ModelRenderer()
+  c4 = MiciModelRenderer()
+  c3.set_view_mode(2, is_night=False)
+  c4.set_view_mode(2, is_night=True)
+  assert c3._view_mode == 2 and c3._view_3d_mode is False
+  assert c4._view_mode == 2 and c4._view_3d_mode is False
+  vr_calls = []
+  c3._draw_vr_view_visualization = lambda s: vr_calls.append(('c3', s))
+  c3._draw_carrot_overlays(sm)
+  assert vr_calls == [('c3', sm)]
 

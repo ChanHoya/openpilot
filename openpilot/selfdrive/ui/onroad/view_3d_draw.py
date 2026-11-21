@@ -138,8 +138,9 @@ def _draw_procedural_vehicle_rear(x: float, y: float, vw: float, vh: float, is_n
 
 
 def draw_vehicle_rear(x: float, y: float, vw: float, vh: float, is_night: bool,
-                      style: str = 'lead', braking: bool = False, alpha: float = 1.0) -> None:
-  """Render realistic lead vehicle rear PNG (images/lead_car.png) with cyan contact glow & brake highlight."""
+                      style: str = 'lead', braking: bool = False, alpha: float = 1.0,
+                      glow: bool = True) -> None:
+  """Render realistic lead vehicle rear PNG (images/lead_car.png) with optional contact glow & brake highlight."""
   if vw < 2 or alpha <= 0.01:
     return
 
@@ -156,22 +157,31 @@ def draw_vehicle_rear(x: float, y: float, vw: float, vh: float, is_night: bool,
   draw_w = float(vw)
   draw_h = float(vw * (float(tex_h) / float(tex_w))) if has_tex else float(vh)
 
-  # 1. Smooth multi-layer fluorescent electric blue-to-cyan gradient ground aura beneath tires
+  # 1. Contact ground aura/shadow beneath tires
   glow_y = y + draw_h * 0.46
-  glow_layers = 16 if draw_w >= 30 else 6
-  for i in range(glow_layers):
-    t = i / float(glow_layers - 1)
-    rx = draw_w * (0.84 - 0.54 * t)
-    ry = max(draw_h * (0.23 - 0.165 * t), 1.0)
-    if t <= 0.55:
-      k = t / 0.55
-      r_ch, g_ch, b_ch = 0, int(140 + 85 * k), 255
-    else:
-      k = (t - 0.55) / 0.45
-      r_ch, g_ch, b_ch = int(165 * k), int(225 + 30 * k), 255
-    # Gentle outer edge fade + quadratic rise toward core (keeps stacked alpha natural)
-    layer_a = (8.0 + 34.0 * (t ** 1.6)) * (16.0 / glow_layers)
-    rl.draw_ellipse(int(x), int(glow_y), rx, ry, _c(r_ch, g_ch, b_ch, layer_a, alpha))
+  if glow:
+    glow_layers = 16 if draw_w >= 30 else 6
+    for i in range(glow_layers):
+      t = i / float(glow_layers - 1)
+      rx = draw_w * (0.84 - 0.54 * t)
+      ry = max(draw_h * (0.23 - 0.165 * t), 1.0)
+      if t <= 0.55:
+        k = t / 0.55
+        r_ch, g_ch, b_ch = 0, int(140 + 85 * k), 255
+      else:
+        k = (t - 0.55) / 0.45
+        r_ch, g_ch, b_ch = int(165 * k), int(225 + 30 * k), 255
+      # Gentle outer edge fade + quadratic rise toward core (keeps stacked alpha natural)
+      layer_a = (8.0 + 34.0 * (t ** 1.6)) * (16.0 / glow_layers)
+      rl.draw_ellipse(int(x), int(glow_y), rx, ry, _c(r_ch, g_ch, b_ch, layer_a, alpha))
+  else:
+    sh_layers = 5 if draw_w >= 30 else 3
+    sh_max = 26 if is_night else 18
+    for i in range(sh_layers):
+      t = i / float(sh_layers - 1)
+      rx = draw_w * (0.58 - 0.20 * t)
+      ry = max(draw_h * (0.14 - 0.07 * t), 1.0)
+      rl.draw_ellipse(int(x), int(glow_y), rx, ry, _c(0, 0, 0, (4 + sh_max * t) * (5.0 / sh_layers), alpha))
 
   if has_tex:
     if style == 'lead_two':

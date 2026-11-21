@@ -13,7 +13,8 @@ from openpilot.selfdrive.ui.onroad.model_renderer import ModelRenderer
 from openpilot.selfdrive.ui.render_diagnostics import RenderDiagnostics
 from openpilot.selfdrive.ui.overlay_state import OverlayState
 from openpilot.selfdrive.ui.onroad.cameraview import CameraView
-from openpilot.selfdrive.ui.onroad.view_3d_button import View3dButton
+from openpilot.selfdrive.ui.onroad.view_3d_button import View3dButton, VIEW_MODE_VR
+from openpilot.selfdrive.ui.onroad.view_vr_scene import draw_vr_background
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.text_draw import draw_text_ui_style
 from openpilot.common.transformations.camera import DEVICE_CAMERAS, DeviceCameraConfig, view_frame_from_device_frame
@@ -129,25 +130,30 @@ class AugmentedRoadView(CameraView):
 
     _t = time.monotonic()
     is_night = self.is_view_3d_night_mode()
+    view_mode = getattr(self._view_3d_button, 'view_mode', 1 if self._view_3d_button.view_3d_mode else 0)
     is_view_3d = self._view_3d_button.view_3d_mode
+    is_vr = view_mode == VIEW_MODE_VR
+    is_virtual = is_view_3d or is_vr
     if self._suppress_camera_for_cluster:
       rl.draw_rectangle_rec(self._content_rect, rl.BLACK)
+    elif is_vr:
+      draw_vr_background(self._content_rect, is_night)
+    elif is_view_3d:
+      self._render_3d_view_background(self._content_rect, is_night)
     else:
       # Render the base camera view
       timing.call('camera', super()._render, rect)
-      if is_view_3d:
-        self._render_3d_view_background(self._content_rect, is_night)
     cam_ms = (time.monotonic() - _t) * 1000.0
 
     self._overlay_state.update(ui_state, self.client, self.stream_type, self._suppress_camera_for_cluster)
 
     if not self._suppress_camera_for_cluster:
       # Draw the model overlay only with the camera view
-      self.model_renderer.set_view_3d_mode(is_view_3d, is_night)
+      self.model_renderer.set_view_mode(view_mode, is_night)
       _t = time.monotonic()
       timing.call('model', self.model_renderer.render, self._content_rect)
       model_ms = (time.monotonic() - _t) * 1000.0
-    self._hud_renderer.set_view_3d_theme(is_view_3d, is_night)
+    self._hud_renderer.set_view_3d_theme(is_virtual, is_night)
     _t = time.monotonic()
     timing.call('hud', self._hud_renderer.render, self._content_rect)  # includes plot when enabled
     hud_ms = (time.monotonic() - _t) * 1000.0

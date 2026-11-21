@@ -6,6 +6,7 @@ import numpy as np
 
 from openpilot.selfdrive.ui.onroad.path_geometry import project_path, sample_path
 from openpilot.selfdrive.ui.onroad.view_3d_scene import View3dScene, C3_SIZES
+from openpilot.selfdrive.ui.onroad.view_vr_scene import ViewVrScene
 from openpilot.selfdrive.ui.render_diagnostics import RenderDiagnostics
 import pyray as rl
 from openpilot.cereal import messaging, car, log
@@ -100,6 +101,7 @@ class ModelRenderer(Widget):
     self._lane_lines = [ModelPoints() for _ in range(4)]
     self._road_edges = [ModelPoints() for _ in range(2)]
     self._acceleration_x = np.empty((0,), dtype=np.float32)
+    self._view_mode: int = 0
     self._view_3d_mode: bool = False
     self._view_3d_is_night: bool = True
 
@@ -128,8 +130,14 @@ class ModelRenderer(Widget):
     self._car_space_transform = transform.astype(np.float32)
     self._transform_dirty = True
 
+  def set_view_mode(self, mode: int, is_night: bool = True) -> None:
+    self._view_mode = int(mode) % 3
+    self._view_3d_mode = self._view_mode == 1
+    self._view_3d_is_night = is_night
+
   def set_view_3d_mode(self, enabled: bool, is_night: bool = True) -> None:
-    self._view_3d_mode = enabled
+    self._view_mode = 1 if enabled else 0
+    self._view_3d_mode = bool(enabled)
     self._view_3d_is_night = is_night
 
   set_fsd_mode = set_view_3d_mode
@@ -200,10 +208,20 @@ class ModelRenderer(Widget):
     # self._draw_path(sm)
     # self._draw_lead_indicator()
     self._draw_carrot_overlays(sm)
-    from openpilot.selfdrive.ui.stop_object import draw_stop_object
-    draw_stop_object(self, sm, started_frame=ui_state.started_frame)
+    if getattr(self, '_view_mode', 0) != 2:
+      from openpilot.selfdrive.ui.stop_object import draw_stop_object
+      draw_stop_object(self, sm, started_frame=ui_state.started_frame)
 
   def _draw_carrot_overlays(self, sm) -> None:
+    if getattr(self, '_view_mode', 0) == 2:
+      timing = self._render_diagnostics
+      timing.start()
+      timing.call('path', self._draw_vr_view_visualization, sm)
+      timing.values['native_draw'] = float(native_draw.active())
+      timing.values['native_geometry'] = float(native_geometry.active())
+      timing.values['native_text'] = float(native_text.active())
+      timing.finish()
+      return
     timing = self._render_diagnostics
     timing.start()
     timing.call('path', self._draw_path_carrot, sm)
@@ -1878,6 +1896,17 @@ class ModelRenderer(Widget):
       self._view_3d_scene = View3dScene(C3_SIZES)
     is_night = getattr(self, '_view_3d_is_night', getattr(self, '_fsd_is_night', True))
     self._view_3d_scene.draw(self, sm, self._rect, is_night)
+
+  def _draw_vr_view_visualization(self, sm):
+    """VR view: 3rd-person chase-camera driving visualization."""
+    if not sm.valid['modelV2']:
+      return
+    if hasattr(self, '_refresh_carrot_params'):
+      self._refresh_carrot_params(rl.get_time())
+    if not hasattr(self, '_view_vr_scene'):
+      self._view_vr_scene = ViewVrScene(is_compact=False)
+    is_night = getattr(self, '_view_3d_is_night', getattr(self, '_fsd_is_night', True))
+    self._view_vr_scene.draw(self, sm, self._rect, is_night)
 
   def _resolve_traffic_light(self, sm, raw: np.ndarray, v_ego: float, now: float) -> tuple[str, float, int]:
     """Resolve active traffic light state ('red', 'yellow', 'left', 'green'), calibrated distance (m), and remaining seconds."""

@@ -53,7 +53,7 @@ class ChaseCamera:
     self._pose = WINDSHIELD_POSE
 
   def update(self, rect, ground_z: float, target: float, yaw_rad: float, dt: float,
-             horizon_frac: float = 0.50) -> None:
+             horizon_frac: float = 0.50, pose: CameraPose | None = None) -> None:
     alpha = 1.0 if dt <= 0 else 1.0 - math.exp(-dt / ZOOM_TIME_CONSTANT_S)
     self.zoom += (float(np.clip(target, 0.0, 1.0)) - self.zoom) * alpha
     max_yaw = math.radians(MAX_YAW_DEG)
@@ -61,9 +61,16 @@ class ChaseCamera:
     self._x0, self._y0 = float(rect.x), float(rect.y)
     self._w, self._h = max(float(rect.width), 1.0), max(float(rect.height), 1.0)
     self._ground_z = float(ground_z)
-    self.horizon_frac = float(np.clip(horizon_frac, 0.35, 0.65))
+    self.horizon_frac = float(np.clip(horizon_frac, 0.25, 0.65))
     self.horizon_y = self._y0 + self.horizon_frac * self._h
-    self._pose = CameraPose(back_m=1.8, height_m=1.65, pitch_deg=0.0, focal_scale=0.52, horizon_frac=self.horizon_frac)
+    base_pose = WINDSHIELD_POSE if pose is None else pose
+    self._pose = CameraPose(
+      back_m=base_pose.back_m,
+      height_m=base_pose.height_m,
+      pitch_deg=base_pose.pitch_deg,
+      focal_scale=base_pose.focal_scale,
+      horizon_frac=self.horizon_frac,
+    )
 
   def _focal_base(self) -> float:
     # C3 is 2:1 and C4 is wider; keep vertical framing consistent on both.

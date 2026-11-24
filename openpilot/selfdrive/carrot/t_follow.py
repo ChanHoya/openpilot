@@ -14,6 +14,29 @@ def get_speed_t_follow_factor(setting: int, speed_kph: float) -> float:
   return 1.0 + (factor_at_100 - 1.0) * max(0.0, speed_kph) / 100.0
 
 
+MID_SPEED_TF_BP = (0.0, 30.0, 42.0, 60.0, 75.0, 90.0, 105.0, 120.0)
+MID_SPEED_TF_WEIGHT = (0.0, 0.0, 0.50, 1.00, 0.80, 0.50, 0.25, 0.0)
+
+
+def get_mid_speed_t_follow_factor(speed_kph: float, ratio_percent: int = 88) -> float:
+  """Calibrated mid-speed factor for 40-70 km/h (20-30m gap):
+  - Exactly 1.0 <= 30 km/h (preserves stop-and-go headway)
+  - Smoothly tightens by up to (100 - ratio)% around 60 km/h
+  - Tapers back to 1.0 at >= 120 km/h (preserves highway safety margin)
+  """
+  ratio = min(100, max(50, ratio_percent)) * 0.01
+  if ratio >= 0.999 or speed_kph <= 30.0 or speed_kph >= 120.0:
+    return 1.0
+  weight = 0.0
+  for i in range(len(MID_SPEED_TF_BP) - 1):
+    bp0, bp1 = MID_SPEED_TF_BP[i], MID_SPEED_TF_BP[i + 1]
+    if bp0 <= speed_kph <= bp1:
+      t = (speed_kph - bp0) / (bp1 - bp0)
+      weight = float(MID_SPEED_TF_WEIGHT[i] + t * (MID_SPEED_TF_WEIGHT[i + 1] - MID_SPEED_TF_WEIGHT[i]))
+      break
+  return float(1.0 - (1.0 - ratio) * weight)
+
+
 def get_lead_response_for_gap(common: int, overrides, gap_index: int) -> int:
   gap_index = int(getattr(gap_index, 'raw', gap_index))
   value = overrides[gap_index]

@@ -234,3 +234,43 @@ def test_real_capnp_dynamic_enum_handling():
   assert controls.is_auto_lane_change is True
 
 
+def test_lane_change_finish_entering_curve_releases_full_curvature():
+  controls = CarrotControls(None)
+  controls.params = SimpleNamespace(get_int=lambda key: 10 if key == "AutoLaneChangeSmooth" else 0)
+  controls.update_params()
+
+  cs = MockCS(steering_pressed=False, steering_torque=0.0)
+  cs.vEgo = 11.4  # ~41 km/h (0000011f seg 7)
+  base_curv = 0.0038
+
+  # Enter laneChangeFinishing -> off
+  m_fin = MockModelV2(lc_state=3, lc_dir=2, desired_curvature=0.0042)
+  controls.smooth_lane_change(cs, m_fin, 0.0042, base_curv)
+  assert controls.finish_smoothing_active is True
+
+  m_off_mild = MockModelV2(lc_state=0, lc_dir=0, desired_curvature=0.0050)
+  _, _, jerk_mild = controls.smooth_lane_change(cs, m_off_mild, 0.0050, base_curv)
+  assert controls.finish_smoothing_active is True
+  assert jerk_mild < 5.0
+
+  # Sharp curve builds (raw=0.0098): finish smoothing immediately yields full curvature & jerk authority
+  m_curve = MockModelV2(lc_state=0, lc_dir=0, desired_curvature=0.0098)
+  curv, ramp, jerk = controls.smooth_lane_change(cs, m_curve, 0.0098, 0.0043)
+  assert controls.finish_smoothing_active is False
+  assert ramp == 1.0
+  assert jerk == 5.0
+  assert curv == pytest.approx(0.0098)
+
+  # Opposite-sign curve transition after lane change also releases immediately
+  controls.reset_lane_change()
+  controls.smooth_lane_change(cs, MockModelV2(lc_state=3, lc_dir=1, desired_curvature=-0.0030), -0.0030, -0.0035)
+  curv_opp, ramp_opp, jerk_opp = controls.smooth_lane_change(
+    cs, MockModelV2(lc_state=0, lc_dir=0, desired_curvature=0.0040), 0.0040, -0.0035
+  )
+  assert controls.finish_smoothing_active is False
+  assert ramp_opp == 1.0
+  assert jerk_opp == 5.0
+  assert curv_opp == pytest.approx(0.0040)
+
+
+

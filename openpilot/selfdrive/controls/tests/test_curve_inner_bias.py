@@ -284,3 +284,44 @@ def test_modeld_action_and_smoothing_respect_curve_inner_bias():
   a30 = ns["get_action_from_model"](output, prev, 0.3, 0.4, v_ego, s30, 0.05, curve_inner_bias=30.0)
   a80 = ns["get_action_from_model"](output, prev, 0.3, 0.4, v_ego, s80, 0.05, curve_inner_bias=80.0)
   assert a80.desiredCurvature > a30.desiredCurvature > a0.desiredCurvature
+
+
+@pytest.mark.parametrize("sign", [1.0, -1.0])
+def test_tight_curve_inside_line_crossing_triggers_strong_outward_recovery_without_sign_flip(sign):
+  v_ego = 10.3
+  base_curv = sign * 0.0176
+  preview_curv = sign * 0.0195
+  yaws, yaw_rates, t_idxs = _make_trajectory(base_curv, preview_curv, v_ego)
+  # Seg 19 shape: drifted onto/over inside line (e.g. R=+0.45, L=-3.05 => y_center=-1.30)
+  lines, probs = _make_lane_lines(y_center=-sign * 1.30, width=3.50)
+
+  curv = compute_curve_inner_curvature_assist(
+    base_curv, yaws, yaw_rates, t_idxs, v_ego, 0.3, 10.0,
+    lane_lines=lines, lane_line_probs=probs,
+  )
+  # Strongly eases curvature outward (> 0.005 reduction) without ever flipping curve sign
+  assert sign * (curv - base_curv) < -0.005
+  assert sign * curv > 0.008
+
+
+def test_high_curvature_tapers_inward_entry_bias():
+  v_ego = 13.0
+  lines_center, probs = _make_lane_lines(y_center=0.0)
+
+  yaws_mod, rates_mod, t_idxs = _make_trajectory(0.004, 0.007, v_ego)
+  curv_mod = compute_curve_inner_curvature_assist(
+    0.004, yaws_mod, rates_mod, t_idxs, v_ego, 0.3, 10.0,
+    lane_lines=lines_center, lane_line_probs=probs,
+  )
+
+  yaws_tight, rates_tight, _ = _make_trajectory(0.018, 0.021, v_ego)
+  curv_tight = compute_curve_inner_curvature_assist(
+    0.018, yaws_tight, rates_tight, t_idxs, v_ego, 0.3, 10.0,
+    lane_lines=lines_center, lane_line_probs=probs,
+  )
+
+  delta_mod = curv_mod - 0.004
+  delta_tight = curv_tight - 0.018
+  assert delta_mod > 0.0
+  assert delta_tight >= 0.0
+  assert delta_tight < delta_mod * 0.4

@@ -399,6 +399,7 @@
                 "LeadAccelResponseTF4",
                 "DynamicTFollowLC",
                 "SpeedTFFactor",
+                "MidSpeedTFRatio",
                 "TFollowDecelBoost"
               ]
             },
@@ -3828,6 +3829,22 @@
           "3.0×"
         ]
       }
+    },
+    {
+      "group": "차량간격",
+      "name": "MidSpeedTFRatio",
+      "title": "중속 차간거리 압축률",
+      "descr": "시속 30km/h 초과 및 차간거리 20~30m 구간(도심·간선도로 40~70km/h)에서 선행차와의 간격을 적정 수준으로 자연스럽게 줄여줍니다. 30km/h 이하 저속 정체 구간은 100% 기본 간격을 유지하며, 급정거 시에는 감속 보류 및 추가 여유가 즉시 작동하여 과도한 제동을 방지합니다. 100은 압축 없음, 기본값 88은 약 12%(2~3m) 단축합니다.",
+      "egroup": "FDIST",
+      "etitle": "Mid-speed TF ratio",
+      "edescr": "Moderately tightens following gap for speeds >30 km/h and distances 20-30m (arterial 40-70 km/h). Headway <=30 km/h is 100% preserved. Deceleration hold and boost activate immediately upon sudden braking to prevent harsh deceleration. 100 is uncompressed; default 88 tightens by ~12% (2-3m).",
+      "cgroup": "跟车距离",
+      "ctitle": "中速车距压缩率",
+      "cdescr": "在车速>30km/h且车距20~30m（城市/主干道40~70km/h）时适度缩短跟车间距。<=30km/h低速拥堵完全保持原距。急刹车时减速保持与额外余量立即生效，防止过度制动。100为无压缩，默认88缩短约12%（2~3米）。",
+      "min": 50,
+      "max": 100,
+      "default": 88,
+      "unit": 1
     },
     {
       "group": "차량간격",

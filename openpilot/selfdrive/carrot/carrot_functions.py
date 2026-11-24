@@ -9,8 +9,8 @@ from openpilot.common.constants import CV
 from openpilot.common.filter_simple import MyMovingAverage
 from openpilot.selfdrive.carrot.carrot_man_input import get_carrot_man
 from openpilot.selfdrive.carrot.t_follow import (
-  get_t_follow_mode_factor, get_t_follow_mode_max, get_speed_t_follow_factor, get_lead_response_for_gap, ramp_t_follow,
-  ramp_mode_t_follow_factor,
+  get_t_follow_mode_factor, get_t_follow_mode_max, get_speed_t_follow_factor, get_mid_speed_t_follow_factor,
+  get_lead_response_for_gap, ramp_t_follow, ramp_mode_t_follow_factor,
 )
 from openpilot.selfdrive.carrot.radar_motion.lane_change_gap import LaneChangeGapPlan, LaneChangeGapTracker
 from openpilot.selfdrive.carrot.driving_mode import DrivingMode, DrivingModeDetector, get_mode_lead_response
@@ -151,6 +151,7 @@ class CarrotPlanner:
     self.leadAccelResponseTF = [-1] * 4
     self.dynamicTFollowLC = 1.0
     self.speedTFFactor = 10
+    self.midSpeedTFRatio = 88
     self.tFollowDecelBoost = 0.0
     self._tf_decel_extra = 0.0
     self._tf_decel_base = None
@@ -158,12 +159,12 @@ class CarrotPlanner:
     self.personality = 1
 
     self.cruiseMaxVals0 = 1.6
-    self.cruiseMaxVals1 = 1.6
-    self.cruiseMaxVals2 = 1.2
-    self.cruiseMaxVals3 = 1.0
-    self.cruiseMaxVals4 = 0.8
-    self.cruiseMaxVals5 = 0.7
-    self.cruiseMaxVals6 = 0.6
+    self.cruiseMaxVals1 = 2.0
+    self.cruiseMaxVals2 = 1.6
+    self.cruiseMaxVals3 = 1.3
+    self.cruiseMaxVals4 = 1.1
+    self.cruiseMaxVals5 = 0.95
+    self.cruiseMaxVals6 = 0.8
 
     self.aChangeCostStarting = 10.0
 
@@ -217,6 +218,7 @@ class CarrotPlanner:
       self.leadAccelResponseTF = [int(np.clip(self.params.get_int(f"LeadAccelResponseTF{i}"), -1, 5)) for i in range(1, 5)]
       self.dynamicTFollowLC = self.params.get_float("DynamicTFollowLC") / 100.
       self.speedTFFactor = int(np.clip(self.params.get_int("SpeedTFFactor"), 10, 30))
+      self.midSpeedTFRatio = int(np.clip(self.params.get_int("MidSpeedTFRatio"), 50, 100))
       self.tFollowDecelBoost = self.params.get_float("TFollowDecelBoost") / 100.
     elif self.params_count == 30:
       self.cruiseMaxVals0 = self.params.get_float("CruiseMaxVals0") / 100.
@@ -259,7 +261,9 @@ class CarrotPlanner:
     return float(tf_base)
 
   def _apply_speed_t_follow_scale(self, tf_base, v_ego):
-    return float(tf_base * get_speed_t_follow_factor(self.speedTFFactor, v_ego * CV.MS_TO_KPH))
+    speed_kph = v_ego * CV.MS_TO_KPH
+    return float(tf_base * get_speed_t_follow_factor(self.speedTFFactor, speed_kph) *
+                 get_mid_speed_t_follow_factor(speed_kph, getattr(self, 'midSpeedTFRatio', 88)))
 
   def _apply_decel_hold_and_boost_t_follow(self, tf_target, a_ego):
     # Hold only the unboosted baseline. Feeding the previous boosted target

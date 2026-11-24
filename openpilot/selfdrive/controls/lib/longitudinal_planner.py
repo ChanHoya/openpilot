@@ -31,6 +31,7 @@ from openpilot.common.stopping_params import get_stopping_speed
 from openpilot.selfdrive.carrot.carrot_man_input import get_carrot_man
 from openpilot.selfdrive.carrot.signal_stop_prepare import PrepareAccel
 from openpilot.selfdrive.controls.lib.cruise_coasting import CruiseCoastingPlan, coasting_percent, no_coasting_lead
+from openpilot.selfdrive.controls.lib.human_longitudinal import HumanLongitudinalShaper
 from openpilot.selfdrive.controls.lib.tesla_traffic_stop import STOP_BUFFER, create_tesla_traffic_stop
 
 
@@ -86,6 +87,8 @@ class LongitudinalPlanner:
     self.vCluRatio = 1.0
     self.reset_decel_timer = 0
     self.reset_decel_start_a = 0.0
+    self.cruise_ramp_a = FirstOrderFilter(0.0, 1.5, self.dt)
+    self.human_longitudinal = HumanLongitudinalShaper(dt=dt)
 
     self.v_cruise_kph = 0.0
 
@@ -165,10 +168,11 @@ class LongitudinalPlanner:
     return x, v, a, j, throttle_prob
 
   def update(self, sm, carrot):
-    self.coasting_param_time += self.dt
-    if self.coasting_param_time >= 1.0:
-      self.coasting_param_time = 0.0
-      self.coasting_percent = coasting_percent(self.params.get_int('CruiseCoastingPercent'))
+    if hasattr(self, 'coasting_param_time'):
+      self.coasting_param_time += self.dt
+      if self.coasting_param_time >= 1.0:
+        self.coasting_param_time = 0.0
+        self.coasting_percent = coasting_percent(self.params.get_int('CruiseCoastingPercent'))
     self.mpc.mode = 'blended' if sm['selfdriveState'].experimentalMode else 'acc'
 
     if len(sm['carControl'].orientationNED) == 3:
@@ -207,8 +211,62 @@ class LongitudinalPlanner:
     prev_accel_constraint = not (reset_state or sm['carState'].standstill)
 
     if self.mpc.mode == 'acc':
-      #accel_limits = [A_CRUISE_MIN, get_max_accel(v_ego)]
-      accel_limits = [A_CRUISE_MIN, carrot.get_carrot_accel(v_ego)]
+      radar_state = sm['radarState']
+      lead_one = getattr(radar_state, 'leadOne', None)
+      has_lead = bool(getattr(lead_one, 'status', False))
+      base_max_accel = carrot.get_carrot_accel(v_ego)
+
+      # ── 저속 출발 응답성 보존 및 중고속 킥다운/서지 방지용 목표 가속도 상한 계산 ──
+      shaper = getattr(self, 'human_longitudinal', None)
+      if shaper is not None:
+        if has_lead and lead_one is not None:
+          a_lead_raw = float(getattr(lead_one, 'aLeadK', 0.0))
+          shaper.update_lead_filter(True, a_lead_raw, int(getattr(lead_one, 'radarTrackId', -1)))
+          d_rel = float(getattr(lead_one, 'dRel', 0.0))
+          v_rel = float(getattr(lead_one, 'vRel', 0.0))
+          v_lead = float(getattr(lead_one, 'vLead', v_ego + v_rel))
+        else:
+          shaper.update_lead_filter(False, 0.0, -1)
+          d_rel = 0.0
+          v_rel = 0.0
+          v_lead = v_ego
+
+        target_a, allowed_max_accel, tau, headroom, start_floor = shaper.compute_ramp_targets(
+          v_ego,
+          base_max_accel,
+          bool(has_lead and lead_one is not None),
+          d_rel=d_rel,
+          v_rel=v_rel,
+          v_lead=v_lead,
+          t_follow=float(getattr(carrot, 't_follow_last', 1.3)),
+          comfort_brake=float(getattr(carrot, 'comfort_brake', 2.5)),
+          stop_dist=float(getattr(carrot, 'stop_distance', 5.0)),
+        )
+      else:
+        target_a = allowed_max_accel = base_max_accel
+        tau, headroom, start_floor = 1.5, 0.40, min(0.75, base_max_accel)
+
+      # ── S-Curve 램프업 (1차 LPF 필터) ──
+      if getattr(self, 'cruise_ramp_a', None) is not None:
+        if reset_state:
+          self.cruise_ramp_a.x = max(0.0, sm['carState'].aEgo)
+        else:
+          if sm['carState'].standstill:
+            self.cruise_ramp_a.x = max(self.cruise_ramp_a.x, start_floor)
+          else:
+            # 계획 기준 가속도(a_desired)로 헤드룸을 제한해 실차 오버슈트(킥다운 등)가 상한을 끌어올리지 않게 한다.
+            current_a = max(0.0, getattr(self, 'a_desired', 0.0))
+            if self.cruise_ramp_a.x > current_a + headroom:
+              self.cruise_ramp_a.x = max(0.40, current_a + headroom)
+
+          self.cruise_ramp_a.update_alpha(tau)
+          self.cruise_ramp_a.update(target_a)
+
+        max_a = min(allowed_max_accel, self.cruise_ramp_a.x)
+      else:
+        max_a = allowed_max_accel
+
+      accel_limits = [A_CRUISE_MIN, max_a]
       curvature_future = get_future_curvature(sm['modelV2'], sm['controlsState'].desiredCurvature)
       a_lat_max = 3.0
       accel_limits_turns = limit_accel_in_turns(
@@ -217,6 +275,8 @@ class LongitudinalPlanner:
         current_curvature=sm['controlsState'].curvature,
       )
     else:
+      if getattr(self, 'cruise_ramp_a', None) is not None:
+        self.cruise_ramp_a.x = max(0.0, sm['carState'].aEgo)
       accel_limits = [ACCEL_MIN, ACCEL_MAX]
       accel_limits_turns = [ACCEL_MIN, ACCEL_MAX]
 
@@ -407,6 +467,96 @@ class LongitudinalPlanner:
       output_v_target_now = min(output_v_target_mpc, output_v_target_now_e2e)
       self.output_should_stop = output_should_stop_e2e or output_should_stop_mpc
 
+    # ── 수동 주행 감각 종방향 셰이핑: 버퍼 추종, 타력주행 우선 감속 및 부드러운 저크 전개 ──
+    output_j_target_now = self.j_desired_trajectory[0]
+    if sm is not None and carrot is not None and getattr(self, 'human_longitudinal', None) is not None:
+      try:
+        self.human_longitudinal.update_params(getattr(self, 'params', None))
+        cs = sm['carState']
+        cc = sm['carControl']
+        lead_one = lead
+        if bool(getattr(lead_one, 'status', False)) and lead_index != 0:
+          self.human_longitudinal.update_lead_filter(
+            True,
+            float(getattr(lead_one, 'aLeadK', 0.0)),
+            int(getattr(lead_one, 'radarTrackId', -1)),
+          )
+        pitch = float(cc.orientationNED[1]) if len(cc.orientationNED) == 3 else 0.0
+        roll = 0.0
+        try:
+          lp_msg = sm['liveParameters']
+          seen_ok = not hasattr(sm, 'seen') or bool(sm.seen.get('liveParameters', False))
+          valid_ok = not hasattr(sm, 'valid') or bool(sm.valid.get('liveParameters', False))
+          if seen_ok and valid_ok and bool(getattr(lp_msg, 'valid', True)):
+            roll = float(getattr(lp_msg, 'roll', 0.0))
+        except (KeyError, TypeError, AttributeError):
+          roll = 0.0
+        try:
+          current_curvature = float(sm['controlsState'].curvature)
+        except (KeyError, TypeError, AttributeError):
+          current_curvature = 0.0
+        try:
+          model_msg = sm['modelV2']
+        except (KeyError, TypeError):
+          model_msg = None
+        prev_output_a = output_a_target
+        tesla_traffic_active = bool(
+          (getattr(self, 'tesla_traffic_decision', None) is not None and self.tesla_traffic_decision.active)
+          or getattr(self, 'tesla_traffic_blended', False)
+        )
+        res = self.human_longitudinal.shape(
+          a_mpc=output_a_target,
+          v_target_mpc=output_v_target_now,
+          j_target_mpc=output_j_target_now,
+          v_ego=v_ego,
+          a_ego=float(getattr(cs, 'aEgo', 0.0)),
+          pitch=pitch,
+          action_t=action_t,
+          lead_status=bool(getattr(lead_one, 'status', False)),
+          d_rel=float(getattr(lead_one, 'dRel', 0.0)),
+          v_rel=float(getattr(lead_one, 'vRel', 0.0)),
+          v_lead=float(getattr(lead_one, 'vLead', v_ego + float(getattr(lead_one, 'vRel', 0.0)))),
+          a_lead=float(getattr(lead_one, 'aLeadK', 0.0)),
+          t_follow=float(getattr(carrot, 't_follow_last', 1.3)),
+          comfort_brake=float(getattr(carrot, 'comfort_brake', 2.5)),
+          stop_dist=float(getattr(carrot, 'stop_distance', 6.0)),
+          should_stop=bool(self.output_should_stop),
+          fcw=bool(self.fcw),
+          reset_state=bool(reset_state or cs.gasPressed or cs.brakePressed or tesla_traffic_active),
+          mpc_mode=self.mpc.mode,
+          predicted_danger_margin=float(getattr(self.mpc, 'predicted_danger_margin', 1e3)),
+          mpc_source=str(getattr(self.mpc, 'source', 'lead0')),
+          model_msg=model_msg,
+          roll=roll,
+          current_curvature=current_curvature,
+          lane_change_active=bool(getattr(carrot, 'lane_change_active', False)),
+          blinker_active=bool(getattr(cs, 'leftBlinker', False) or getattr(cs, 'rightBlinker', False)),
+          lead_radar=bool(getattr(lead_one, 'radar', False)),
+        )
+        output_a_target = res.a_target
+        output_v_target_now = res.v_target_now
+        output_j_target_now = res.j_target_now
+        if res.curve_decel > 0.05:
+          coasting_turn_blocked = True
+        closing_or_braking_lead = (
+          bool(getattr(lead_one, 'status', False))
+          and (float(getattr(lead_one, 'vRel', 0.0)) < -1.0 or float(getattr(lead_one, 'aLeadK', 0.0)) < -0.8)
+        )
+        if res.shaped and not res.is_urgent:
+          if res.a_target > prev_output_a + 0.02:
+            if not (prev_output_a < -0.55 and closing_or_braking_lead):
+              self.a_desired = max(self.a_desired, res.a_target)
+              target_v_sync = v_ego + res.a_target * self.dt
+              self.v_desired_filter.x = max(self.v_desired_filter.x, target_v_sync)
+              if res.a_target >= res.a_coast - 0.05 and self.v_desired_filter.x < v_ego - 0.15:
+                alpha = float(np.clip(self.dt / 0.45, 0.0, 1.0))
+                self.v_desired_filter.x += alpha * (target_v_sync - self.v_desired_filter.x)
+          elif res.a_target < prev_output_a - 0.02:
+            self.a_desired = min(self.a_desired, res.a_target)
+            self.v_desired_filter.x = min(self.v_desired_filter.x, v_ego + res.a_target * self.dt)
+      except (NameError, KeyError, TypeError, AttributeError):
+        pass
+
     #for idx in range(2):
     #  accel_clip[idx] = np.clip(accel_clip[idx], self.prev_accel_clip[idx] - 0.05, self.prev_accel_clip[idx] + 0.05)
     #self.output_a_target = np.clip(output_a_target, accel_clip[0], accel_clip[1])
@@ -414,7 +564,7 @@ class LongitudinalPlanner:
     self.output_a_target_base = output_a_target_base
     self.output_a_target = output_a_target
     self.output_v_target_now = output_v_target_now
-    self.output_j_target_now = self.j_desired_trajectory[0]
+    self.output_j_target_now = output_j_target_now
 
     self.update_coasting(sm, carrot, v_cruise_kph, v_cruise, reset_state,
                          force_slow_decel, coasting_turn_blocked, cutin_predecel_limit)

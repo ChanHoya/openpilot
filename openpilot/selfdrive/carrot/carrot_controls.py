@@ -139,17 +139,29 @@ class CarrotControls:
         max_lateral_jerk = 1.5 if self.lane_change_ramp < 0.95 else 5.0
 
     elif (lc_state == 3 or self.finish_smoothing_active) and not CS.steeringPressed:
-      self.lane_change_finish_timer += DT_CTRL
-      finish_duration = min(ramp_duration, 1.0)
-      if self.lane_change_finish_timer < finish_duration:
-        p = min(1.0, max(0.0, self.lane_change_finish_timer / finish_duration))
-        ramp = 3.0 * (p ** 2) - 2.0 * (p ** 3)
-        target_curvature = (1.0 - ramp) * self.lane_change_finish_base_curvature + ramp * raw_desired_curvature
-        max_lateral_jerk = 1.8 if ramp < 0.95 else 5.0
-        self.lane_change_ramp = 1.0
-      else:
+      v_ego = float(getattr(CS, "vEgo", 0.0))
+      base_mag = abs(self.lane_change_finish_base_curvature)
+      raw_mag = abs(raw_desired_curvature)
+      entering_curve = (
+        (raw_mag > max(base_mag + 0.0025, 0.0055))
+        or (raw_mag * (v_ego ** 2) > 0.65 and raw_mag > base_mag + 0.0015)
+        or ((raw_desired_curvature * self.lane_change_finish_base_curvature) < 0.0 and raw_mag > 0.0030)
+      )
+      if entering_curve:
         self.finish_smoothing_active = False
         self.lane_change_ramp = 1.0
+      else:
+        self.lane_change_finish_timer += DT_CTRL
+        finish_duration = min(ramp_duration, 1.0 if lc_state == 3 else 0.5)
+        if self.lane_change_finish_timer < finish_duration:
+          p = min(1.0, max(0.0, self.lane_change_finish_timer / finish_duration))
+          ramp = 3.0 * (p ** 2) - 2.0 * (p ** 3)
+          target_curvature = (1.0 - ramp) * self.lane_change_finish_base_curvature + ramp * raw_desired_curvature
+          max_lateral_jerk = 1.8 if ramp < 0.95 else 5.0
+          self.lane_change_ramp = 1.0
+        else:
+          self.finish_smoothing_active = False
+          self.lane_change_ramp = 1.0
     else:
       self.finish_smoothing_active = False
       self.lane_change_ramp = 1.0

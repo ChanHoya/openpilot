@@ -81,7 +81,8 @@ def get_lat_smooth_seconds_dynamic(model_output: dict[str, np.ndarray],
                                    base_lat_smooth_seconds: float,
                                    v_ego: float = 0.0,
                                    lat_action_t: float = 0.3,
-                                   curve_inner_bias: float = 0.0) -> tuple[float, float, float]:
+                                   curve_inner_bias: float = 0.0,
+                                   prev_desired_curvature: float = 0.0) -> tuple[float, float, float]:
   if base_lat_smooth_seconds <= 0.0:
     return 0.0, 0.0, 0.0
 
@@ -105,6 +106,25 @@ def get_lat_smooth_seconds_dynamic(model_output: dict[str, np.ndarray],
     dynamic_lat_smooth_seconds = float(np.clip((base_lat_smooth_seconds + extra_smooth_seconds) * entry_factor, 0.0, 0.60))
   else:
     dynamic_lat_smooth_seconds = float(np.clip(base_lat_smooth_seconds + extra_smooth_seconds, 0.0, 0.60))
+
+  if v_ego > 5.0 and abs(prev_desired_curvature) > 0.0035:
+    if 'action' in model_output:
+      k_cur = float(model_output['action'][0, 0]) / (max(2.5, float(v_ego)) ** 2)
+    elif 'plan' in model_output:
+      plan = model_output['plan'][0]
+      k_cur = float(get_curvature_from_plan(
+        plan[:, Plan.T_FROM_CURRENT_EULER][:, 2],
+        plan[:, Plan.ORIENTATION_RATE][:, 2],
+        ModelConstants.T_IDXS,
+        v_ego,
+        lat_action_t,
+      ))
+    else:
+      k_cur = prev_desired_curvature
+    if (k_cur * prev_desired_curvature) > 0.0 and abs(k_cur) < abs(prev_desired_curvature):
+      drop_ratio = (abs(prev_desired_curvature) - abs(k_cur)) / max(abs(prev_desired_curvature), 1e-4)
+      unwind_scale = float(np.interp(drop_ratio, [0.05, 0.30], [1.0, 1.65]))
+      dynamic_lat_smooth_seconds = float(np.clip(dynamic_lat_smooth_seconds * unwind_scale, dynamic_lat_smooth_seconds, 0.45))
 
   return dynamic_lat_smooth_seconds, y_std_1s, extra_smooth_seconds
 
@@ -636,6 +656,7 @@ def main(demo=False):
           v_ego=v_ego,
           lat_action_t=lat_action_t,
           curve_inner_bias=curve_inner_bias,
+          prev_desired_curvature=float(prev_action.desiredCurvature),
         )
       if custom_lat_delay > 0.0:
         lat_delay_dynamic = custom_lat_delay + lat_smooth_seconds_dynamic

@@ -1341,6 +1341,8 @@ class CarrotServ:
     self.bearing = self._update_gps(v_ego, sm, gps_service)
 
     self.xSpdDist = max(self.xSpdDist - delta_dist, -1000)
+    if getattr(self, "nSdiDist", 0) > 0:
+      self.nSdiDist = max(self.nSdiDist - delta_dist, 0)
     if getattr(self, "nSdiPlusDist", 0) > 0:
       self.nSdiPlusDist = max(self.nSdiPlusDist - delta_dist, 0)
     self.xDistToTurn = self.xDistToTurn - delta_dist
@@ -1554,6 +1556,18 @@ class CarrotServ:
       spd_type = 22
       spd_limit = int(self.autoNaviSpeedBumpSpeed)
       spd_dist = sdi_bump_dist
+    elif source == "hda_bump" and CS is not None and CS.speedBumpDistance > 0:
+      spd_type = 22
+      spd_limit = int(self.autoNaviSpeedBumpSpeed)
+      spd_dist = CS.speedBumpDistance
+    elif spd_type < 0 and sdi_bump_dist > 0:
+      spd_type = 22
+      spd_limit = int(self.autoNaviSpeedBumpSpeed)
+      spd_dist = sdi_bump_dist
+    elif spd_type < 0 and vehicle_bump_active and CS is not None and CS.speedBumpDistance > 0:
+      spd_type = 22
+      spd_limit = int(self.autoNaviSpeedBumpSpeed)
+      spd_dist = CS.speedBumpDistance
 
     msg.carrotMan.xSpdType = int(spd_type)
     msg.carrotMan.xSpdLimit = int(spd_limit)
@@ -1589,7 +1603,7 @@ class CarrotServ:
 
     msg.carrotMan.nGoPosDist = self.nGoPosDist
     msg.carrotMan.nGoPosTime = self.nGoPosTime
-    sdi_type_for_descr = 22 if source == "bump" else (-1 if self.nSdiType == 0 and self.nSdiDist == 0 else self.nSdiType)
+    sdi_type_for_descr = 22 if source in ("bump", "hda_bump") else (-1 if self.nSdiType == 0 and self.nSdiDist == 0 else self.nSdiType)
     msg.carrotMan.szSdiDescr = self._get_sdi_descr(sdi_type_for_descr)
     if rear_camera_holding and source == "cam":
       label = {"ko": "후면단속 속도 유지", "en": "Rear camera speed hold", "zh": "后向测速限速保持"}.get(self.lang, "Rear camera speed hold")

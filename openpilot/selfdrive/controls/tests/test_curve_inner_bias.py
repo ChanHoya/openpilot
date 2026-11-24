@@ -325,3 +325,88 @@ def test_high_curvature_tapers_inward_entry_bias():
   assert delta_mod > 0.0
   assert delta_tight >= 0.0
   assert delta_tight < delta_mod * 0.4
+
+
+@pytest.mark.parametrize("sign", [1.0, -1.0])
+def test_mid_curve_safe_clearance_bounds_counter_steering_dips(sign):
+  # Seg 14 shape: G80 comfortably inside curve (R=+1.31m, y_center=-0.38m) while curve continues ahead
+  v_ego = 10.0
+  base_14 = sign * 0.0084
+  yaws_14, rates_14, t_idxs = _make_trajectory(base_14, sign * 0.0110, v_ego)
+  lines_14, probs_14 = _make_lane_lines(y_center=-sign * 0.38, width=3.40)
+  curv_14 = compute_curve_inner_curvature_assist(
+    base_14, yaws_14, rates_14, t_idxs, v_ego, 0.3, 10.0,
+    lane_lines=lines_14, lane_line_probs=probs_14,
+  )
+  assert abs(curv_14 - base_14) <= 0.18 * abs(base_14)
+
+  # Seg 44 shape: tight curve easing slightly toward inner side (R=+0.80m, y_center=-0.75m)
+  base_44 = sign * 0.0190
+  yaws_44, rates_44, _ = _make_trajectory(base_44, sign * 0.0185, 10.7)
+  lines_44, probs_44 = _make_lane_lines(y_center=-sign * 0.75, width=3.10)
+  curv_44 = compute_curve_inner_curvature_assist(
+    base_44, yaws_44, rates_44, t_idxs, 10.7, 0.3, 10.0,
+    lane_lines=lines_44, lane_line_probs=probs_44,
+  )
+  assert abs(curv_44 - base_44) <= 0.25 * abs(base_44)
+  assert sign * curv_44 > 0.014
+
+
+def test_modeld_asymmetric_in_curve_unwind_smoothing():
+  src = Path(__file__).resolve().parents[2] / "modeld" / "modeld.py"
+  tree = ast.parse(src.read_text(), filename=str(src))
+  needed = {"get_lat_smooth_seconds_dynamic"}
+  ns = {
+    "np": np,
+    "Plan": Plan,
+    "ModelConstants": ModelConstants,
+    "get_curvature_from_plan": lambda yaws, rates, t_idxs, v_ego, action_t: 0.0,
+    "compute_curve_entry_smooth_factor": lambda *_a, **_kw: 1.0,
+  }
+  body = [
+    node for node in tree.body
+    if isinstance(node, ast.FunctionDef) and node.name in needed
+  ]
+  exec(compile(ast.Module(body=body, type_ignores=[]), str(src), "exec"), ns)
+
+  def _make_out(k_action: float, v_ego: float):
+    plan = np.zeros((1, ModelConstants.IDX_N, ModelConstants.PLAN_WIDTH))
+    plan[0, :, Plan.VELOCITY][:, 0] = v_ego
+    plan_stds = np.zeros((1, ModelConstants.IDX_N, ModelConstants.PLAN_WIDTH))
+    action = np.array([[k_action * (v_ego ** 2), 0.0]], dtype=float)
+    return {"plan": plan, "plan_stds": plan_stds, "action": action}
+
+  v_ego = 11.0
+  # Sudden unwind drop inside curve (0.014 -> 0.008): increases smoothing tau above base 0.13s
+  s_unwind, _, _ = ns["get_lat_smooth_seconds_dynamic"](
+    _make_out(0.008, v_ego), 0.13, v_ego=v_ego, lat_action_t=0.3, curve_inner_bias=0.0, prev_desired_curvature=0.014
+  )
+  assert s_unwind > 0.13
+
+  # Entry increase (0.004 -> 0.012): does not inflate smoothing tau
+  s_entry, _, _ = ns["get_lat_smooth_seconds_dynamic"](
+    _make_out(0.012, v_ego), 0.13, v_ego=v_ego, lat_action_t=0.3, curve_inner_bias=0.0, prev_desired_curvature=0.004
+  )
+  assert s_entry <= 0.13
+
+  # S-curve sign reversal (0.008 -> -0.004): does not inflate smoothing tau
+  s_rev, _, _ = ns["get_lat_smooth_seconds_dynamic"](
+    _make_out(-0.004, v_ego), 0.13, v_ego=v_ego, lat_action_t=0.3, curve_inner_bias=0.0, prev_desired_curvature=0.008
+  )
+  assert s_rev == pytest.approx(0.13)
+
+
+def test_entry_smooth_factor_default_bias_10_reduces_entry_lag():
+  yaws_in, rates_in, t_idxs = _make_trajectory(0.003, 0.011, 18.0)
+  f10 = compute_curve_entry_smooth_factor(yaws_in, rates_in, t_idxs, 18.0, 0.3, 10.0)
+  f30 = compute_curve_entry_smooth_factor(yaws_in, rates_in, t_idxs, 18.0, 0.3, 30.0)
+  f80 = compute_curve_entry_smooth_factor(yaws_in, rates_in, t_idxs, 18.0, 0.3, 80.0)
+  assert 0.85 <= f80 < f30 < f10 < 0.94
+
+  yaws_s6, rates_s6, t_idxs_s6 = _make_trajectory(-0.030, -0.044, 7.5)
+  f10_s6 = compute_curve_entry_smooth_factor(yaws_s6, rates_s6, t_idxs_s6, 7.5, 0.3, 10.0)
+  f30_s6 = compute_curve_entry_smooth_factor(yaws_s6, rates_s6, t_idxs_s6, 7.5, 0.3, 30.0)
+  f80_s6 = compute_curve_entry_smooth_factor(yaws_s6, rates_s6, t_idxs_s6, 7.5, 0.3, 80.0)
+  assert 0.85 <= f80_s6 < f30_s6 < f10_s6 < 0.96
+
+

@@ -42,10 +42,16 @@ jobs:
         env:
           WIKI_URL: https://github.com/${{ github.repository }}.wiki.git
         run: |
-          git clone --depth 1 "$WIKI_URL" "$RUNNER_TEMP/carrot-wiki"
-          echo "sha=$(git -C "$RUNNER_TEMP/carrot-wiki" rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if GIT_TERMINAL_PROMPT=0 git clone --depth 1 "$WIKI_URL" "$RUNNER_TEMP/carrot-wiki"; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "sha=$(git -C "$RUNNER_TEMP/carrot-wiki" rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          else
+            echo "Wiki repository is not initialized or inaccessible without credentials; skipping read-only wiki diff." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Generate and validate Wiki changes
+        if: steps.wiki.outputs.available == 'true'
         env:
           CATALOG_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
           WIKI_COMMIT: ${{ steps.wiki.outputs.sha }}
@@ -64,7 +70,7 @@ jobs:
           fi
 
       - name: Upload read-only report
-        if: always()
+        if: always() && steps.wiki.outputs.available == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: wiki-settings-report-${{ github.event.pull_request.number || github.run_number }}

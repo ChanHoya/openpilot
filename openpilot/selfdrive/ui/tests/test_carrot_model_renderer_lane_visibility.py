@@ -115,6 +115,8 @@ def model_renderer_module(monkeypatch):
     "openpilot.common.filter_simple": SimpleNamespace(FirstOrderFilter=FirstOrderFilter),
     "openpilot.common.params": SimpleNamespace(Params=Params),
     "openpilot.selfdrive.locationd.calibrationd": SimpleNamespace(HEIGHT_INIT=(1.22,)),
+    "openpilot.selfdrive.ui.onroad.view_3d_scene": SimpleNamespace(View3dScene=object, C3_SIZES=None),
+    "openpilot.selfdrive.ui.onroad.view_vr_scene": SimpleNamespace(ViewVrScene=object),
     "openpilot.selfdrive.ui.ui_state": SimpleNamespace(ui_state=SimpleNamespace()),
     "openpilot.system.ui.lib.application": SimpleNamespace(
       gui_app=SimpleNamespace(target_fps=20, font=lambda _weight: Font()),
@@ -350,50 +352,36 @@ def test_blind_spot_barrier_vectorization_matches_scalar_reference(model_rendere
 
 def test_blind_spot_segment_vectorization_preserves_fill_outline_order(model_renderer_module, monkeypatch):
   module = model_renderer_module
-  renderer = object.__new__(module.ModelRenderer)
-  upper = np.array(
-    [[100.0, 700.0], [110.0, 650.0], [120.0, 600.0], [130.0, 550.0], [140.0, 500.0], [150.0, 450.0]],
-    dtype=np.float32,
-  )
-  lower = np.array(
-    [[90.0, 710.0], [100.0, 660.0], [110.0, 610.0], [120.0, 560.0], [130.0, 510.0], [140.0, 460.0]],
-    dtype=np.float32,
-  )
-  points = np.vstack((upper, lower[::-1]))
+  import openpilot.selfdrive.ui.onroad as onroad_pkg
+
   color = module.rl.Color(255, 215, 0, 150)
   events = []
-  monkeypatch.setattr(
-    module,
-    "draw_polygon_solid",
-    lambda quad, fill_color: events.append(("fill", quad.copy(), fill_color)),
-  )
-  renderer._draw_polygon_outline_carrot = (
-    lambda quad, outline_color, thickness: events.append(("outline", quad.copy(), outline_color, thickness))
-  )
-
-  expected_quads = []
-  count = points.shape[0]
-  half = count // 2
-  for i in range(0, half - 2, 2):
-    quad = np.array(
-      [points[i], points[i + 1], points[count - i - 3], points[count - i - 2]],
-      dtype=np.float32,
+  fake_view_3d_draw = types.ModuleType("openpilot.selfdrive.ui.onroad.view_3d_draw")
+  fake_view_3d_draw.draw_blindspot_radar_wave = (
+    lambda anchor_x, anchor_y, side_sign, color=None, scale=1.0, alpha=1.0, show_triangle=True: events.append(
+      (anchor_x, anchor_y, side_sign, color, scale, alpha, show_triangle)
     )
-    center = np.mean(quad, axis=0)
-    angles = np.arctan2(quad[:, 1] - center[1], quad[:, 0] - center[0])
-    expected_quads.append(quad[np.argsort(angles)])
+  )
+  monkeypatch.setitem(sys.modules, "openpilot.selfdrive.ui.onroad.view_3d_draw", fake_view_3d_draw)
+  monkeypatch.setattr(onroad_pkg, "view_3d_draw", fake_view_3d_draw, raising=False)
 
-  renderer._draw_blind_spot_segments_carrot(points, color)
+  renderer = object.__new__(module.ModelRenderer)
+  renderer._rect = module.rl.Rectangle(0.0, 0.0, 2160.0, 1080.0)
 
-  assert [event[0] for event in events] == ["fill", "outline", "fill", "outline"]
-  for index, expected in enumerate(expected_quads):
-    fill = events[index * 2]
-    outline = events[index * 2 + 1]
-    np.testing.assert_array_equal(fill[1], expected)
-    np.testing.assert_array_equal(outline[1], expected)
-    assert fill[2] == color
-    assert outline[2] == module.rl.WHITE
-    assert outline[3] == 2.0
+  left_points = np.array([[50.0, 200.0], [120.0, 450.0]], dtype=np.float32)
+  right_points = np.array([[2100.0, 1050.0], [2050.0, 800.0]], dtype=np.float32)
+  renderer._draw_blind_spot_segments_carrot(left_points, color)
+  renderer._draw_blind_spot_segments_carrot(right_points, color)
+
+  renderer_no_rect = object.__new__(module.ModelRenderer)
+  fallback_points = np.array([[500.0, 600.0], [520.0, 550.0]], dtype=np.float32)
+  renderer_no_rect._draw_blind_spot_segments_carrot(fallback_points, color)
+
+  assert events == [
+    (160.0, 350.0, -1.0, color, 1.0, 1.0, True),
+    (2000.0, 980.0, 1.0, color, 1.0, 1.0, True),
+    (500.0, 600.0, -1.0, color, 1.0, 1.0, True),
+  ]
 
 
 @pytest.mark.parametrize('invalid_service, expected_draws', [

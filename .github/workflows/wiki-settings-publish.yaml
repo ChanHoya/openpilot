@@ -41,14 +41,21 @@ jobs:
           echo "catalog=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Check out current Wiki
+        id: wiki
         env:
-          WIKI_URL: https://github.com/${{ github.repository }}.wiki.git
+          WIKI_URL: https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git
         run: |
-          git clone "$WIKI_URL" "$RUNNER_TEMP/carrot-wiki"
-          git -C "$RUNNER_TEMP/carrot-wiki" config user.name "github-actions[bot]"
-          git -C "$RUNNER_TEMP/carrot-wiki" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if GIT_TERMINAL_PROMPT=0 git clone "$WIKI_URL" "$RUNNER_TEMP/carrot-wiki"; then
+            git -C "$RUNNER_TEMP/carrot-wiki" config user.name "github-actions[bot]"
+            git -C "$RUNNER_TEMP/carrot-wiki" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Wiki repository is not initialized or inaccessible; skipping wiki sync." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Validate candidate before any write
+        if: steps.wiki.outputs.available == 'true'
         run: |
           python tools/docs/wiki_settings/ci_check.py \
             --wiki-dir "$RUNNER_TEMP/carrot-wiki" \
@@ -57,6 +64,7 @@ jobs:
             --wiki-commit "$(git -C "$RUNNER_TEMP/carrot-wiki" rev-parse HEAD)"
 
       - name: Synchronize generated Wiki regions
+        if: steps.wiki.outputs.available == 'true'
         run: |
           python tools/docs/wiki_settings/generate.py \
             --wiki-dir "$RUNNER_TEMP/carrot-wiki" \
@@ -65,6 +73,7 @@ jobs:
             --catalog-commit "${{ steps.source.outputs.catalog }}"
 
       - name: Validate synchronized Wiki
+        if: steps.wiki.outputs.available == 'true'
         run: |
           python tools/docs/wiki_settings/ci_check.py \
             --wiki-dir "$RUNNER_TEMP/carrot-wiki" \
@@ -72,6 +81,7 @@ jobs:
             --catalog-commit "${{ steps.source.outputs.catalog }}"
 
       - name: Push synchronized Wiki when changed
+        if: steps.wiki.outputs.available == 'true'
         env:
           WIKI_PUSH_URL: https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git
         run: |

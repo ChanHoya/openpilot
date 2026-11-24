@@ -26,6 +26,8 @@ from enum import IntEnum
 from openpilot.selfdrive.ui.mici.onroad.traffic_light import TrafficLight
 import math
 from openpilot.common.params import Params
+from openpilot.selfdrive.ui.onroad.augmented_road_view import is_night_time
+from openpilot.selfdrive.ui.onroad.view_3d_button import View3dButton, FsdButton
 
 OpState = log.SelfdriveState.OpenpilotState
 CALIBRATED = log.LiveCalibrationData.Status.calibrated
@@ -173,6 +175,8 @@ class AugmentedRoadView(CameraView):
     self._driver_state_renderer = DriverPreview(compact=True)
     self._confidence_ball = ConfidenceBall()
     self._traffic_light = TrafficLight()
+    self._view_3d_button = View3dButton(width=80, height=34)
+    self._fsd_button = self._view_3d_button
     self._offroad_label = UnifiedLabel("start the car to\nuse openpilot", 54, FontWeight.DISPLAY,
                                        text_color=rl.Color(255, 255, 255, int(255 * 0.9)),
                                        alignment=TextAlignment.CENTER,
@@ -214,8 +218,57 @@ class AugmentedRoadView(CameraView):
     else:
       self._offroad_label.set_text("start the car to\nuse openpilot")
 
+  def is_view_3d_night_mode(self) -> bool:
+    try:
+      theme_mode = self.params.get_int("View3dThemeMode")
+      if theme_mode == 0:
+        theme_mode = self.params.get_int("FsdThemeMode")
+    except Exception:
+      theme_mode = 0
+    if theme_mode == 1:
+      return False
+    if theme_mode == 2:
+      return True
+    return is_night_time()
+
+  is_fsd_night_mode = is_view_3d_night_mode
+
+  def _render_3d_view_background(self, rect: rl.Rectangle, is_night: bool = True) -> None:
+    horizon_y = None
+    if hasattr(self._model_renderer, '_car_space_transform') and self._model_renderer._car_space_transform is not None:
+      try:
+        inf_pt = self._model_renderer._car_space_transform @ np.array([1000.0, 0.0, 0.0])
+        if abs(inf_pt[2]) > 1e-4:
+          horizon_y = float(inf_pt[1] / inf_pt[2])
+      except Exception:
+        pass
+    if horizon_y is None or not np.isfinite(horizon_y) or horizon_y <= 0:
+      road_y = int(rect.y + rect.height * 0.50)
+    else:
+      road_y = int(np.clip(horizon_y, rect.y + rect.height * 0.35, rect.y + rect.height * 0.65))
+    horizon_h = max(1, int(road_y - rect.y))
+    road_h = max(1, int(rect.height - horizon_h))
+
+    if is_night:
+      rl.draw_rectangle_gradient_v(int(rect.x), int(rect.y), int(rect.width), horizon_h,
+                                   rl.Color(12, 16, 22, 255), rl.Color(18, 24, 34, 255))
+      rl.draw_rectangle_gradient_v(int(rect.x), road_y, int(rect.width), road_h,
+                                   rl.Color(18, 24, 34, 255), rl.Color(24, 32, 44, 255))
+      rl.draw_line_ex(rl.Vector2(rect.x, road_y), rl.Vector2(rect.x + rect.width, road_y), 1.5, rl.Color(42, 52, 70, 160))
+    else:
+      rl.draw_rectangle_gradient_v(int(rect.x), int(rect.y), int(rect.width), horizon_h,
+                                   rl.Color(158, 172, 192, 255), rl.Color(138, 152, 172, 255))
+      rl.draw_rectangle_gradient_v(int(rect.x), road_y, int(rect.width), road_h,
+                                   rl.Color(122, 135, 154, 255), rl.Color(98, 110, 128, 255))
+      rl.draw_line_ex(rl.Vector2(rect.x, road_y), rl.Vector2(rect.x + rect.width, road_y), 1.5, rl.Color(160, 175, 198, 200))
+
+  _render_fsd_background = _render_3d_view_background
+
   def _handle_mouse_release(self, mouse_pos: MousePos):
-    # Don't trigger click callback if bookmark was triggered
+    # Don't trigger click callback if 3D view button or bookmark was triggered
+    btn = getattr(self, '_view_3d_button', getattr(self, '_fsd_button', None))
+    if btn is not None and (btn.is_pressed or rl.check_collision_point_rec(mouse_pos, btn.rect)):
+      return
     if not self._bookmark_icon.interacting():
       super()._handle_mouse_release(mouse_pos)
 
@@ -251,9 +304,20 @@ class AugmentedRoadView(CameraView):
     )
 
     road_view_mode = self._road_view_mode()
+    btn = getattr(self, '_view_3d_button', getattr(self, '_fsd_button', None))
+    view_mode = getattr(btn, 'view_mode', 1 if getattr(btn, 'view_3d_mode', False) else 0) if btn is not None else 0
+    is_view_3d = getattr(btn, 'view_3d_mode', getattr(btn, 'fsd_mode', False)) if btn is not None else False
+    is_vr = view_mode == 2
+    is_virtual = is_view_3d or is_vr
+    is_night = self.is_view_3d_night_mode() if hasattr(self, 'is_view_3d_night_mode') else True
     _t = time.monotonic()
     if self._suppress_camera_for_cluster or road_view_mode in (2, 3):
       rl.draw_rectangle_rec(self._content_rect, rl.BLACK)
+    elif is_vr:
+      from openpilot.selfdrive.ui.onroad.view_vr_scene import draw_vr_background
+      draw_vr_background(self._content_rect, is_night)
+    elif is_view_3d:
+      self._render_3d_view_background(self._content_rect, is_night)
     else:
       # Render the base camera view
       super()._render(self._content_rect)
@@ -263,12 +327,18 @@ class AugmentedRoadView(CameraView):
 
     if not self._suppress_camera_for_cluster and road_view_mode in (0, 2):
       # Draw all UI overlays
+      if hasattr(self._model_renderer, 'set_view_mode'):
+        self._model_renderer.set_view_mode(view_mode, is_night)
+      elif hasattr(self._model_renderer, 'set_view_3d_mode'):
+        self._model_renderer.set_view_3d_mode(is_view_3d, is_night)
+      elif hasattr(self._model_renderer, 'set_fsd_mode'):
+        self._model_renderer.set_fsd_mode(is_view_3d, is_night)
       _t = time.monotonic()
       timing.call('model', self._model_renderer.render, self._content_rect)
       model_ms = (time.monotonic() - _t) * 1000.0
 
-    if not self._suppress_camera_for_cluster:
-      # Fade out bottom of overlays for looks
+    if not self._suppress_camera_for_cluster and not is_virtual:
+      # Fade out bottom of overlays for looks (not needed in pure FSD/VR view)
       _t = time.monotonic()
       rl.draw_texture_ex(self._fade_texture, rl.Vector2(self._content_rect.x, self._content_rect.y), 0.0, 1.0, rl.WHITE)
       extras_ms += (time.monotonic() - _t) * 1000.0
@@ -280,6 +350,10 @@ class AugmentedRoadView(CameraView):
     self._hud_renderer.set_can_draw_top_icons(alert_to_render is None)
     self._hud_renderer.set_wheel_critical_icon(alert_to_render is not None and not not_animating_out and
                                                alert_to_render.visual_alert == car.CarControl.HUDControl.VisualAlert.steerRequired)
+    if hasattr(self._hud_renderer, 'set_view_3d_theme'):
+      self._hud_renderer.set_view_3d_theme(is_virtual, is_night)
+    elif hasattr(self._hud_renderer, 'set_fsd_theme'):
+      self._hud_renderer.set_fsd_theme(is_virtual, is_night)
     # TODO: have alert renderer draw offroad mici label below
     _t = time.monotonic()
     self._hud_renderer.render(self._content_rect)
@@ -294,6 +368,15 @@ class AugmentedRoadView(CameraView):
     _t = time.monotonic()
     rl.draw_rectangle_rounded_lines_ex(self._content_rect, 0.2 * 1.02, 10, 50, rl.BLACK)
     extras_ms += (time.monotonic() - _t) * 1000.0
+
+    # Custom UI extension point - add custom overlays here
+    # Use self._content_rect for positioning within camera bounds
+    if btn is not None:
+      btn_w = 80
+      btn_h = 34
+      btn_x = self._content_rect.x + self._content_rect.width - btn_w - 12
+      btn_y = self._content_rect.y + 55
+      btn.render(rl.Rectangle(btn_x, btn_y, btn_w, btn_h))
 
     # End clipping region
     rl.end_scissor_mode()

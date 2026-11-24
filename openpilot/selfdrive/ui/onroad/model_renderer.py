@@ -1,9 +1,12 @@
+import json
 import math
 import colorsys
 import time
 import numpy as np
 
 from openpilot.selfdrive.ui.onroad.path_geometry import project_path, sample_path
+from openpilot.selfdrive.ui.onroad.view_3d_scene import View3dScene, C3_SIZES
+from openpilot.selfdrive.ui.onroad.view_vr_scene import ViewVrScene
 from openpilot.selfdrive.ui.render_diagnostics import RenderDiagnostics
 import pyray as rl
 from openpilot.cereal import messaging, car, log
@@ -28,6 +31,7 @@ from openpilot.system.ui.lib.overlay_cache import OverlayLayer, DisplayClock
 CLIP_MARGIN = 500
 MIN_DRAW_DISTANCE = 10.0
 MAX_DRAW_DISTANCE = 100.0
+SPEED_BUMP_DIST_OFFSET_M = 10.0
 CARROT_PARAM_REFRESH_INTERVAL = 1.0
 
 LaneChangeState = log.LaneChangeState
@@ -97,6 +101,9 @@ class ModelRenderer(Widget):
     self._lane_lines = [ModelPoints() for _ in range(4)]
     self._road_edges = [ModelPoints() for _ in range(2)]
     self._acceleration_x = np.empty((0,), dtype=np.float32)
+    self._view_mode: int = 0
+    self._view_3d_mode: bool = False
+    self._view_3d_is_night: bool = True
 
     # Transform matrix (3x3 for car space to screen space)
     self._car_space_transform = np.zeros((3, 3), dtype=np.float32)
@@ -122,6 +129,34 @@ class ModelRenderer(Widget):
   def set_transform(self, transform: np.ndarray):
     self._car_space_transform = transform.astype(np.float32)
     self._transform_dirty = True
+
+  def set_view_mode(self, mode: int, is_night: bool = True) -> None:
+    self._view_mode = int(mode) % 3
+    self._view_3d_mode = self._view_mode == 1
+    self._view_3d_is_night = is_night
+
+  def set_view_3d_mode(self, enabled: bool, is_night: bool = True) -> None:
+    self._view_mode = 1 if enabled else 0
+    self._view_3d_mode = bool(enabled)
+    self._view_3d_is_night = is_night
+
+  set_fsd_mode = set_view_3d_mode
+
+  @property
+  def _fsd_mode(self) -> bool:
+    return self._view_3d_mode
+
+  @_fsd_mode.setter
+  def _fsd_mode(self, val: bool) -> None:
+    self._view_3d_mode = val
+
+  @property
+  def _fsd_is_night(self) -> bool:
+    return self._view_3d_is_night
+
+  @_fsd_is_night.setter
+  def _fsd_is_night(self, val: bool) -> None:
+    self._view_3d_is_night = val
 
   def _render(self, rect: rl.Rectangle):
     state = self._overlay_state
@@ -151,6 +186,8 @@ class ModelRenderer(Widget):
     if sm.recv_frame['carParams'] != self._params_frame:
       self._params_frame = sm.recv_frame['carParams']
       self._longitudinal_control = sm['carParams'].openpilotLongitudinalControl
+      wb = float(getattr(sm['carParams'], 'wheelbase', 0.0) or 0.0)
+      self._carrot_cam_to_bumper_m = self._estimate_cam_to_bumper_m(wb)
 
     model = sm['modelV2']
     if sm.recv_frame['modelV2'] != self._model_frame:
@@ -171,14 +208,26 @@ class ModelRenderer(Widget):
     # self._draw_path(sm)
     # self._draw_lead_indicator()
     self._draw_carrot_overlays(sm)
-    from openpilot.selfdrive.ui.stop_object import draw_stop_object
-    draw_stop_object(self, sm, started_frame=ui_state.started_frame)
+    if getattr(self, '_view_mode', 0) != 2:
+      from openpilot.selfdrive.ui.stop_object import draw_stop_object
+      draw_stop_object(self, sm, started_frame=ui_state.started_frame)
 
   def _draw_carrot_overlays(self, sm) -> None:
+    if getattr(self, '_view_mode', 0) == 2:
+      timing = self._render_diagnostics
+      timing.start()
+      timing.call('path', self._draw_vr_view_visualization, sm)
+      timing.values['native_draw'] = float(native_draw.active())
+      timing.values['native_geometry'] = float(native_geometry.active())
+      timing.values['native_text'] = float(native_text.active())
+      timing.finish()
+      return
     timing = self._render_diagnostics
     timing.start()
     timing.call('path', self._draw_path_carrot, sm)
     timing.call('lanes', self._draw_lane_lines_carrot, sm)
+    timing.call('markers', self._draw_road_markers_carrot, sm)
+    timing.call('path_labels', self._draw_path_end_overlay_carrot)
     timing.call('blindspot', self._draw_blind_spot_carrot, sm)
     timing.call('radar', self._draw_radar_info_carrot, sm)
     timing.values['native_draw'] = float(native_draw.active())
@@ -384,10 +433,27 @@ class ModelRenderer(Widget):
     x, y = pt[0] / pt[2], pt[1] / pt[2]
 
     clip = self._clip_region
-    if not (clip.x <= x <= clip.x + clip.width and clip.y <= y <= clip.y + clip.height):
+    if clip is not None and not (clip.x <= x <= clip.x + clip.width and clip.y <= y <= clip.y + clip.height):
       return None
 
     return (x, y)
+
+  def _project_point_unclipped(self, in_x: float, in_y: float, in_z: float):
+    """Project a camera-space point to screen space without rectangle clipping (guards close/overhead bounds)."""
+    pt = self._car_space_transform @ np.array([in_x, in_y, in_z], dtype=np.float32)
+    if not np.isfinite(pt[2]) or pt[2] <= 0.1:
+      return None
+    x, y = float(pt[0] / pt[2]), float(pt[1] / pt[2])
+    if not (math.isfinite(x) and math.isfinite(y)):
+      return None
+    return (x, y)
+
+  @staticmethod
+  def _estimate_cam_to_bumper_m(wheelbase: float) -> float:
+    """Estimate longitudinal distance (m) from windshield camera to front bumper from wheelbase."""
+    if wheelbase > 0.5:
+      return float(np.clip(0.55 * wheelbase + 0.45, 1.52, 2.35))
+    return 1.52
 
   def _map_line_to_polygon(self, line: np.ndarray, y_off: float, z_off: float, max_idx: int, max_distance: float, allow_invert: bool = True, y_shift: float = 0.0, start_idx: int = 0) -> np.ndarray:
     return native_geometry.project_ribbon(line, y_off, z_off, max_idx, self._car_space_transform,
@@ -455,6 +521,16 @@ class ModelRenderer(Widget):
     self._carrot_lead_status = False
     self._carrot_radar_dist = 0.0
     self._carrot_vision_dist = 0.0
+    self._carrot_cam_to_bumper_m = 1.52
+    self._carrot_lead_dist_m = 0.0
+    self._carrot_bump_raw_dist = 0.0
+    self._carrot_bump_est_dist = 0.0
+    self._carrot_bump_last_t = 0.0
+    self._carrot_tl_raw_ts = 0.0
+    self._carrot_tl_raw_dist = 0.0
+    self._carrot_tl_est_dist = 0.0
+    self._carrot_tl_last_t = 0.0
+    self._carrot_model_stop_dist = 0.0
     self._carrot_x_state = 0
     self._carrot_traffic_state = 0
     self._carrot_v_ego = 0.0
@@ -470,6 +546,10 @@ class ModelRenderer(Widget):
     self._carrot_lead_two_xl = 0.0
     self._carrot_lead_two_xr = 0.0
     self._carrot_lead_two_y = 0.0
+    self._carrot_lead_two_dist = 0.0
+    self._carrot_lead_v_lead = 0.0
+    self._carrot_dash_offset = 0.0
+    self._carrot_last_dash_time = time.monotonic()
 
     self._carrot_colors = [
       rl.Color(255, 0, 0, 120),
@@ -730,47 +810,99 @@ class ModelRenderer(Widget):
 
     max_distance = np.clip(line[-1, 0], MIN_DRAW_DISTANCE, MAX_DRAW_DISTANCE)
     idx = self._get_path_length_idx(line[:, 0], max_distance)
+    # modelV2 position(line)은 calib frame(+Y=우측, -Y=좌측)을 따르며 _car_space_transform과 동일 좌표계임
     y = float(line[idx, 1])
     z = float(line[idx, 2])
 
     if len(model.leadsV3) > 0 and model.leadsV3[0].prob > 0.5:
-      self._carrot_vision_dist = model.leadsV3[0].x[0] - 1.52
+      self._carrot_vision_dist = max(0.0, float(model.leadsV3[0].x[0]) - self._carrot_cam_to_bumper_m)
     else:
       self._carrot_vision_dist = 0.0
 
     self._carrot_lead_status = False
     self._carrot_radar_track_id = -1
     self._carrot_radar_dist = 0.0
+    self._carrot_lead_dist_m = 0.0
 
     if lead_one is not None and lead_one.status:
-      lead_idx = self._get_path_length_idx(line[:, 0], lead_one.dRel)
+      raw_d_rel = float(lead_one.dRel)
+      vision_bias = 0.0 if lead_one.radar else (self._carrot_cam_to_bumper_m - 1.52)
+      cal_d_rel = max(0.0, raw_d_rel - vision_bias)
+      lead_d = max(0.3, cal_d_rel)
+      lead_idx = self._get_path_length_idx(line[:, 0], lead_d)
       z = float(line[lead_idx, 2])
-      max_distance = float(lead_one.dRel)
-      y = float(-lead_one.yRel)
-      self._carrot_radar_track_id = int(lead_one.radarTrackId)
-      self._carrot_radar_dist = float(lead_one.dRel) if lead_one.radar else 0.0
-      self._carrot_lead_status = True
+      max_distance = lead_d
 
-    left_pt = self._map_to_screen(max_distance, y - 1.2, z + 1.22)
-    right_pt = self._map_to_screen(max_distance, y + 1.2, z + 1.22)
+      # 1) radarState.leadOne.yRel은 road frame(+Y=좌측)이므로 calib frame(+Y=우측)에 맞춰 -yRel 적용
+      sensor_y = -float(lead_one.yRel)
+      # 2) 주행선 궤적(modelV2.position)은 이미 calib frame(+Y=우측)
+      path_y_proj = float(line[lead_idx, 1])
+
+      # 3) 정차 및 주행 상황별 융합:
+      #    - 커브길 및 주행 시: 선행차를 주행선 궤적(path_y_proj)의 중앙에 정확히 배치 (코너 궤적 안쪽 정렬 보장)
+      #      레이더 축이 직진 방향을 가리켜도(sensor_y 오차), 차선 궤적 안쪽에 차량이 유지되도록 path_y_proj를 주축으로 정렬
+      #    - 정차 시 (v_ego < 1.0 or v_lead < 1.0): 근거리 정차 상태에서 센서 측정 위치와 궤적을 융합
+      v_lead_cur = float(getattr(lead_one, 'vLead', getattr(lead_one, 'vLeadK', self._carrot_v_ego + float(getattr(lead_one, 'vRel', 0.0)))))
+      d_path = float(getattr(lead_one, 'dPath', 0.0))
+      lat_offset = -d_path if abs(d_path) < 1.0 else float(np.clip(sensor_y - path_y_proj, -0.6, 0.6))
+
+      if self._carrot_v_ego < 1.0 or v_lead_cur < 1.0:
+        y = sensor_y if abs(sensor_y - path_y_proj) < 0.8 else path_y_proj + float(np.clip(sensor_y - path_y_proj, -0.5, 0.5))
+      else:
+        # 커브길(주행선 횡편차 큰 구간)에서는 거리 표시선(주행선 중앙)에 차량이 정확히 일치하도록 보정
+        curve_weight = 0.0 if abs(path_y_proj) > 0.6 else 0.15
+        y = path_y_proj + curve_weight * float(np.clip(lat_offset, -0.25, 0.25))
+
+      self._carrot_radar_track_id = int(lead_one.radarTrackId)
+      self._carrot_radar_dist = max(0.0, raw_d_rel) if lead_one.radar else 0.0
+      self._carrot_lead_dist_m = self._carrot_radar_dist if self._carrot_radar_dist > 0.0 else (
+        self._carrot_vision_dist if self._carrot_vision_dist > 0.0 else cal_d_rel
+      )
+      self._carrot_lead_status = True
+      self._carrot_lead_a_rel = float(getattr(lead_one, 'aLead', getattr(lead_one, 'aLeadK', getattr(lead_one, 'aRel', 0.0))))
+      self._carrot_lead_v_rel = float(getattr(lead_one, 'vRel', 0.0))
+      self._carrot_lead_v_lead = v_lead_cur
+
+    proj_d = max(max_distance, 1.8)
+    left_pt = self._map_to_screen(proj_d, y - 1.0, z + 1.22)
+    right_pt = self._map_to_screen(proj_d, y + 1.0, z + 1.22)
+    # 초근거리(1m 내외)에서는 1.22m 높이가 화면 상단 밖으로 나갈 수 있으므로 범퍼/노면 높이로 단계적 폴백
+    if left_pt is None or right_pt is None:
+      left_pt = self._map_to_screen(proj_d, y - 1.0, z + 0.4)
+      right_pt = self._map_to_screen(proj_d, y + 1.0, z + 0.4)
+    if left_pt is None or right_pt is None:
+      left_pt = self._map_to_screen(proj_d, y - 1.0, z)
+      right_pt = self._map_to_screen(proj_d, y + 1.0, z)
     if left_pt is not None and right_pt is not None:
       lex, ley = left_pt
       rex, rey = right_pt
-      path_width = rex - lex
+      path_width = abs(rex - lex)
+      # 1미터 이내 초근거리 정차 시 거리 역수 비율로 차폭 확대 및 화면 하단 배치
+      if max_distance < 1.8:
+        scale_near = 1.8 / max(0.4, max_distance)
+        path_width = path_width * scale_near
+        path_y = min(self._rect.height - 40.0, (ley + rey) / 2.0 + (scale_near - 1.0) * 80.0)
+      else:
+        path_y = (ley + rey) / 2.0
       path_x = (lex + rex) / 2.0
-      path_y = (ley + rey) / 2.0
 
-      path_x = float(np.clip(path_x, 350.0, self._rect.width - 350.0))
-      path_y = float(np.clip(path_y, 200.0, self._rect.height - 80.0))
+      path_x = float(np.clip(path_x, 150.0, self._rect.width - 150.0))
+      path_y = float(np.clip(path_y, 180.0, self._rect.height - 40.0))
 
-      alpha = self._display_clock.retention(self._carrot_path_alpha)
+      # 첫 감지 시 바로 초기화하여 초기 중앙 고정 지연 방지
+      if getattr(self, '_carrot_path_fx', 0.0) == 0.0:
+        self._carrot_path_fx = path_x
+        self._carrot_path_fy = path_y
+        self._carrot_path_fwidth = path_width
+
+      # 커브 진입 시 반응 지연이 없도록 오차 기반 동적 alpha 적용
+      err = abs(path_x - self._carrot_path_fx)
+      base_alpha = 0.15 if err > 15.0 else (0.35 if err > 5.0 else 0.60)
+      alpha = self._display_clock.retention(base_alpha)
       self._carrot_path_fx = self._carrot_path_fx * alpha + path_x * (1.0 - alpha)
       self._carrot_path_fy = self._carrot_path_fy * alpha + path_y * (1.0 - alpha)
 
-      if path_width < 120.0:
-        path_width = 120.0
-      elif path_width > 800.0:
-        path_width = 800.0
+      path_width = float(np.clip(path_width, 100.0, 1400.0))
 
       self._carrot_path_fwidth = self._carrot_path_fwidth * alpha + path_width * (1.0 - alpha)
       self._carrot_path_x = int(self._carrot_path_fx)
@@ -779,82 +911,83 @@ class ModelRenderer(Widget):
 
     self._carrot_t_follow = float(lp.tFollow)
     self._carrot_tf_distance = float(lp.desiredDistance)
-    tf_idx = self._get_path_length_idx(line[:, 0], self._carrot_tf_distance)
+    tf_x_cam = self._carrot_tf_distance + self._carrot_cam_to_bumper_m if self._carrot_tf_distance > 0.0 else 0.0
+    tf_idx = self._get_path_length_idx(line[:, 0], tf_x_cam)
     tf_y = float(line[tf_idx, 1])
     tf_z = float(line[tf_idx, 2])
-    self._carrot_tf_left = self._map_to_screen(self._carrot_tf_distance, tf_y - 1.0, tf_z + 1.22)
-    self._carrot_tf_right = self._map_to_screen(self._carrot_tf_distance, tf_y + 1.0, tf_z + 1.22)
+    self._carrot_tf_left = self._map_to_screen(tf_x_cam, tf_y - 1.0, tf_z + 1.22)
+    self._carrot_tf_right = self._map_to_screen(tf_x_cam, tf_y + 1.0, tf_z + 1.22)
 
-    if lead_two is not None and lead_one is not None and lead_two.radar and lead_two.dRel > lead_one.dRel + 3.0:
-      lead_two_idx = self._get_path_length_idx(line[:, 0], lead_two.dRel)
-      z2 = float(line[lead_two_idx, 2])
-      y2 = float(-lead_two.yRel)
-      lead_two_left = self._map_to_screen(lead_two.dRel, y2 - 1.2, z2 + 1.22)
-      lead_two_right = self._map_to_screen(lead_two.dRel, y2 + 1.2, z2 + 1.22)
+    if lead_two is not None and lead_two.status:
+      d2 = float(lead_two.dRel)
+      min_lead_d = float(lead_one.dRel) if (lead_one is not None and lead_one.status) else 0.0
+      if d2 > min_lead_d + 1.5:
+        lead_two_idx = self._get_path_length_idx(line[:, 0], d2)
+        z2 = float(line[lead_two_idx, 2])
+        path_y2 = float(line[lead_two_idx, 1])
+        sensor_y2 = -float(lead_two.yRel) if hasattr(lead_two, 'yRel') else path_y2
+        y2 = 0.65 * path_y2 + 0.35 * sensor_y2 if abs(sensor_y2 - path_y2) < 1.5 else sensor_y2
+        proj_d2 = max(d2, 1.8)
+        lead_two_left = self._map_to_screen(proj_d2, y2 - 1.0, z2 + 1.22)
+        lead_two_right = self._map_to_screen(proj_d2, y2 + 1.0, z2 + 1.22)
+        if lead_two_left is None or lead_two_right is None:
+          lead_two_left = self._map_to_screen(proj_d2, y2 - 1.0, z2 + 0.4)
+          lead_two_right = self._map_to_screen(proj_d2, y2 + 1.0, z2 + 0.4)
 
-      if lead_two_left is not None and lead_two_right is not None:
-        if self._carrot_lead_two_status > 0:
-          retain = self._display_clock.retention(0.8)
-          self._carrot_lead_two_xl = self._carrot_lead_two_xl * retain + lead_two_left[0] * (1.0 - retain)
-          self._carrot_lead_two_xr = self._carrot_lead_two_xr * retain + lead_two_right[0] * (1.0 - retain)
-          self._carrot_lead_two_y = self._carrot_lead_two_y * retain + lead_two_left[1] * (1.0 - retain)
+        if lead_two_left is not None and lead_two_right is not None:
+          if self._carrot_lead_two_status > 0:
+            retain = self._display_clock.retention(0.75)
+            self._carrot_lead_two_xl = self._carrot_lead_two_xl * retain + lead_two_left[0] * (1.0 - retain)
+            self._carrot_lead_two_xr = self._carrot_lead_two_xr * retain + lead_two_right[0] * (1.0 - retain)
+            self._carrot_lead_two_y = self._carrot_lead_two_y * retain + lead_two_left[1] * (1.0 - retain)
+          else:
+            self._carrot_lead_two_xl = lead_two_left[0]
+            self._carrot_lead_two_xr = lead_two_right[0]
+            self._carrot_lead_two_y = lead_two_left[1]
+
+          self._carrot_lead_two_dist = d2
+          src = int(lp.longitudinalPlanSource.raw)
+          self._carrot_lead_two_status = 2 if src == 1 else 1
         else:
-          self._carrot_lead_two_xl = lead_two_left[0]
-          self._carrot_lead_two_xr = lead_two_right[0]
-          self._carrot_lead_two_y = lead_two_left[1]
-
-        src = int(lp.longitudinalPlanSource.raw)
-        self._carrot_lead_two_status = 2 if src == 1 else 1
+          self._carrot_lead_two_status = 0
+      else:
+        self._carrot_lead_two_status = 0
     else:
       self._carrot_lead_two_status = 0
 
 
+  @staticmethod
+  def _lead_car_distance_scale(dist_m: float) -> float:
+    """Distance-proportional width scale: compact at standstill (~0.78), growing smoothly at range (~1.75)."""
+    if dist_m <= 3.0:
+      return 0.78
+    if dist_m >= 45.0:
+      return 1.75
+    return 0.78 + (1.75 - 0.78) * ((dist_m - 3.0) / 42.0)
+
   def _draw_path_end_overlay_carrot(self):
     x = self._carrot_path_x
     y = self._carrot_path_y - 135
-    disp_y = y + 195
+    disp_y = float(y + 195)
+    box_half_spread = 80
 
-    if self._carrot_soft_hold_active or self._carrot_brake_hold_active or self._carrot_carrot_cruise:
-      text = "AUTOHOLD" if self._carrot_brake_hold_active else ("SOFTHOLD" if self._carrot_soft_hold_active else "CARROT")
-      draw_text_ui_style(text, x, disp_y, 50, rl.Color(255, 255, 255, 255), align="center", y_offset=0.0)
-    else:
-      draw_dist = False
-      if self._carrot_long_active:
-        if self._carrot_x_state in (3, 5):
-          if self._carrot_v_ego < 1.0:
-            text = "Signal Error" if self._carrot_traffic_state >= 1000 else "Signal Ready"
-            draw_text_ui_style(text, x, disp_y, 50, rl.Color(255, 255, 255, 255), align="center", y_offset=0.0)
-          else:
-            draw_text_ui_style("Signal slowing", x, disp_y, 50, rl.Color(255, 255, 255, 255), align="center", y_offset=0.0)
-        elif self._carrot_x_state == 4:
-          draw_text_ui_style("E2E주행중", x, disp_y, 50, rl.Color(255, 255, 255, 255), align="center", y_offset=0.0)
-        elif self._carrot_x_state == 6:
-          draw_text_ui_style("신호 감속 준비", x, disp_y, 50, rl.Color(255, 190, 80, 255), align="center", y_offset=0.0)
-        elif self._carrot_x_state in (0, 1, 2):
-          draw_dist = True
+    is_3d = getattr(self, '_view_3d_mode', False) or getattr(self, '_fsd_mode', False)
+    is_night = getattr(self, '_view_3d_is_night', getattr(self, '_fsd_is_night', True))
+
+    # 앞차의 앞차(leadTwo)가 인식된 경우 추가 렌더링
+    if self._carrot_lead_two_status > 0:
+      path_width2 = max(40.0, float(self._carrot_lead_two_xr - self._carrot_lead_two_xl))
+      d2 = getattr(self, '_carrot_lead_two_dist', 25.0)
+      s2 = self._lead_car_distance_scale(d2)
+      car_w2 = float(path_width2 * s2)
+      car_h2 = float(car_w2 * (433.0 / 612.0))
+      car_cx2 = float((self._carrot_lead_two_xl + self._carrot_lead_two_xr) / 2.0)
+      car_cy2 = float(self._carrot_lead_two_y - car_h2 * 0.42)
+      if is_3d:
+        from openpilot.selfdrive.ui.onroad import view_3d_draw
+        view_3d_draw.draw_sleek_sedan_rear(car_cx2, car_cy2, car_w2, car_h2, is_night, style='lead_two', braking=False, alpha=0.80)
       else:
-        draw_dist = True
-
-      if draw_dist:
-        w = 80
-        text_color = rl.Color(255, 255, 255, 255) if self._carrot_x_state == 0 else (rl.Color(191, 191, 191, 255) if self._carrot_x_state == 1 else rl.Color(0, 203, 0, 255))
-        if self._carrot_radar_dist > 0.0:
-          dist_text = f"{self._carrot_radar_dist:.1f}"
-          box_color = rl.Color(255, 0, 0, 255) if self._carrot_radar_track_id < 1 else rl.Color(255, 175, 3, 255)
-          self._draw_text_box_carrot(x - w, disp_y, dist_text, 40, box_color)
-          draw_text_ui_style(dist_text, x - w, disp_y, 40, text_color, align="center", y_offset=0.0)
-        if self._carrot_vision_dist > 0.0:
-          dist_text = f"{self._carrot_vision_dist:.1f}"
-          self._draw_text_box_carrot(x + w, disp_y, dist_text, 40, rl.Color(0, 0, 255, 255))
-          draw_text_ui_style(dist_text, x + w, disp_y, 40, text_color, align="center", y_offset=0.0)
-
-    self._draw_tf_marker_carrot()
-
-    if self._carrot_lead_status:
-      rcolor = rl.Color(255, 0, 0, 255) if self._carrot_radar_track_id < 1 else rl.Color(255, 175, 3, 255)
-      if self._carrot_lead_two_status > 0:
         radar_stroke = rl.Color(218, 111, 37, 255)
-        path_width2 = int(self._carrot_lead_two_xr - self._carrot_lead_two_xl)
         fill_color = rl.Color(255, 0, 0, 50) if self._carrot_lead_two_status == 2 else rl.Color(0, 0, 0, 20)
         self._draw_rect_fill_outline_carrot(
           self._carrot_lead_two_xl - 10,
@@ -866,23 +999,117 @@ class ModelRenderer(Widget):
           3.0,
         )
 
-      radar_stroke = rcolor if self._carrot_radar_track_id >= 0 else rl.Color(0, 0, 255, 255)
-      self._draw_rect_fill_outline_carrot(
-        self._carrot_path_x - self._carrot_path_width_px / 2 - 10,
-        self._carrot_path_y - self._carrot_path_width_px * 0.8,
-        self._carrot_path_width_px + 20,
-        self._carrot_path_width_px * 0.8,
-        rl.Color(0, 0, 0, 20),
-        radar_stroke,
-        3.0,
-      )
+    lead_d = 10.0
+    tire_bottom_y = float(self._carrot_path_y)
+    if self._carrot_lead_status:
+      if is_3d:
+        from openpilot.selfdrive.ui.onroad import view_3d_draw
+        # 3D view mode: 전체 거리별 크기 90% 조정 및 정차 근접 시 타이어가 살짝 가려질 정도로 하단 배치
+        lead_d = float(self._carrot_radar_dist if self._carrot_radar_dist > 0.0 else (
+          self._carrot_vision_dist if self._carrot_vision_dist > 0.0 else (
+            self._carrot_lead_dist_m if getattr(self, '_carrot_lead_dist_m', 0.0) > 0.0 else 10.0
+          )
+        ))
+        scale = self._lead_car_distance_scale(lead_d)
+        screen_w = float(getattr(self._rect, 'width', 2160.0) or 2160.0)
+        screen_h = float(getattr(self._rect, 'height', 1080.0) or 1080.0)
+        car_w = float(min(self._carrot_path_width_px * scale, screen_w * 0.44))
+        # 첨부 선행차 PNG(612x433) 원본 종횡비 유지
+        car_h = float(car_w * (433.0 / 612.0))
+        car_cx = float(self._carrot_path_x)
+        # 10m 이하부터 정차까지 단조롭게 아래로 이동하여, 바로 앞 정차 시 범퍼 절반 정도가 화면 하단에 걸치도록 배치
+        close_t = float(np.clip((10.0 - lead_d) / 8.5, 0.0, 1.0))
+        road_bottom_y = float(self._carrot_path_y + car_h * 0.04)
+        standstill_bottom_y = float(screen_h + car_h * 0.24)
+        tire_bottom_y = (1.0 - close_t) * road_bottom_y + close_t * standstill_bottom_y
+        car_cy = float(tire_bottom_y - car_h * 0.50)
+        disp_y = float(np.clip(tire_bottom_y + 28.0, 220.0, screen_h - 60.0))
+        box_half_spread = int(np.clip(car_w * 0.68, 135.0, 260.0))
+
+        a_lead = getattr(self, '_carrot_lead_a_rel', 0.0)
+        v_lead = getattr(self, '_carrot_lead_v_lead', 10.0)
+        v_rel = getattr(self, '_carrot_lead_v_rel', 0.0)
+        v_ego = getattr(self, '_carrot_v_ego', 0.0)
+
+        # 1) 정차 시: 선행차 정차 또는 내차 정차 시 빨갛게 발광 점등 유지
+        is_standstill = bool(v_lead < 0.6 or (v_ego < 0.5 and abs(v_rel) < 0.5))
+        # 2) 주행 중: 내 차의 가속으로 인한 v_rel 오탐 완전 배제. 오직 선행차의 실제 브레이크 감속(a_lead < -0.60 m/s^2) 시에만 점등
+        is_braking = is_standstill or bool(a_lead < -0.60)
+
+        view_3d_draw.draw_sleek_sedan_rear(car_cx, car_cy, car_w, car_h, is_night, style='lead', braking=is_braking, alpha=1.0)
+      else:
+        rcolor = rl.Color(255, 0, 0, 255) if self._carrot_radar_track_id < 1 else rl.Color(255, 175, 3, 255)
+        radar_stroke = rcolor if self._carrot_radar_track_id >= 0 else rl.Color(0, 0, 255, 255)
+        self._draw_rect_fill_outline_carrot(
+          self._carrot_path_x - self._carrot_path_width_px / 2 - 10,
+          self._carrot_path_y - self._carrot_path_width_px * 0.8,
+          self._carrot_path_width_px + 20,
+          self._carrot_path_width_px * 0.8,
+          rl.Color(0, 0, 0, 20),
+          radar_stroke,
+          3.0,
+        )
+
+    if self._carrot_soft_hold_active or self._carrot_brake_hold_active or self._carrot_carrot_cruise:
+      text = "AUTOHOLD" if self._carrot_brake_hold_active else ("SOFTHOLD" if self._carrot_soft_hold_active else "CARROT")
+      draw_text_ui_style(text, x, int(disp_y), 50, rl.Color(255, 255, 255, 255), align="center", y_offset=0.0)
+    else:
+      draw_dist = False
+      if self._carrot_long_active:
+        if self._carrot_x_state in (3, 5):
+          if self._carrot_v_ego < 1.0:
+            text = "Signal Error" if self._carrot_traffic_state >= 1000 else "Signal Ready"
+            draw_text_ui_style(text, x, int(disp_y), 50, rl.Color(255, 255, 255, 255), align="center", y_offset=0.0)
+          else:
+            draw_text_ui_style("Signal slowing", x, int(disp_y), 50, rl.Color(255, 255, 255, 255), align="center", y_offset=0.0)
+        elif self._carrot_x_state == 4:
+          draw_text_ui_style("E2E주행중", x, int(disp_y), 50, rl.Color(255, 255, 255, 255), align="center", y_offset=0.0)
+        elif self._carrot_x_state == 6:
+          draw_text_ui_style("신호 감속 준비", x, int(disp_y), 50, rl.Color(255, 190, 80, 255), align="center", y_offset=0.0)
+        elif self._carrot_x_state in (0, 1, 2):
+          draw_dist = True
+      else:
+        draw_dist = True
+
+      if draw_dist:
+        w = box_half_spread
+        text_color = rl.Color(255, 255, 255, 255) if self._carrot_x_state == 0 else (rl.Color(191, 191, 191, 255) if self._carrot_x_state == 1 else rl.Color(0, 203, 0, 255))
+        if self._carrot_radar_dist > 0.0:
+          dist_text = f"{self._carrot_radar_dist:.1f}"
+          box_color = rl.Color(255, 0, 0, 255) if self._carrot_radar_track_id < 1 else rl.Color(255, 175, 3, 255)
+          self._draw_text_box_carrot(x - w, int(disp_y), dist_text, 40, box_color)
+          draw_text_ui_style(dist_text, x - w, int(disp_y), 40, text_color, align="center", y_offset=0.0)
+        if self._carrot_vision_dist > 0.0:
+          dist_text = f"{self._carrot_vision_dist:.1f}"
+          self._draw_text_box_carrot(x + w, int(disp_y), dist_text, 40, rl.Color(0, 0, 255, 255))
+          draw_text_ui_style(dist_text, x + w, int(disp_y), 40, text_color, align="center", y_offset=0.0)
+
+    self._draw_tf_marker_carrot(is_3d=is_3d, lead_active=bool(self._carrot_lead_status),
+                                lead_dist=lead_d, center_x=float(x), disp_y=disp_y)
 
 
-  def _draw_tf_marker_carrot(self):
+  def _draw_tf_marker_carrot(self, is_3d: bool = False, lead_active: bool = False,
+                             lead_dist: float = 0.0, center_x: float = 0.0, disp_y: float = 0.0):
     if self._carrot_tf_distance > 0.0 and self._carrot_tf_left is not None and self._carrot_tf_right is not None:
-      self._draw_line_segment_carrot(self._carrot_tf_left, self._carrot_tf_right, rl.Color(255, 255, 255, 255), 3.0)
-      draw_text_ui_style(f"{self._carrot_tf_distance:.0f} m", int(self._carrot_tf_right[0]) + 10, int(self._carrot_tf_right[1]),
-                         25, rl.Color(255, 255, 255, 255), align="left", y_offset=0.0)
+      if is_3d:
+        lx, ly = float(self._carrot_tf_left[0]), float(self._carrot_tf_left[1])
+        rx, ry = float(self._carrot_tf_right[0]), float(self._carrot_tf_right[1])
+        bar_cx = (lx + rx) * 0.5
+        bar_cy = (ly + ry) * 0.5
+        if lead_active and self._carrot_tf_distance >= max(0.0, lead_dist - 2.0) and disp_y > 0.0:
+          half_w = min(max(40.0, (rx - lx) * 0.5), 80.0)
+          dist_label = f"{lead_dist:.1f}m" if lead_dist < 10.0 else f"{lead_dist:.0f}m"
+          self._draw_line_segment_carrot((center_x - half_w, disp_y), (center_x + half_w, disp_y), rl.Color(255, 255, 255, 220), 3.0)
+          draw_text_ui_style(dist_label, int(center_x), int(disp_y),
+                             40, rl.Color(255, 255, 255, 255), align="center", y_offset=0.0)
+        else:
+          self._draw_line_segment_carrot(self._carrot_tf_left, self._carrot_tf_right, rl.Color(255, 255, 255, 255), 3.0)
+          draw_text_ui_style(f"{self._carrot_tf_distance:.0f}m", int(bar_cx), int(bar_cy),
+                             40, rl.Color(255, 255, 255, 255), align="center", y_offset=0.0)
+      else:
+        self._draw_line_segment_carrot(self._carrot_tf_left, self._carrot_tf_right, rl.Color(255, 255, 255, 255), 3.0)
+        draw_text_ui_style(f"{self._carrot_tf_distance:.0f} m", int(self._carrot_tf_right[0]) + 10, int(self._carrot_tf_right[1]),
+                           25, rl.Color(255, 255, 255, 255), align="left", y_offset=0.0)
 
   def _draw_lane_lines_carrot(self, sm):
     if self._carrot_show_lane_info < 1:
@@ -900,6 +1127,15 @@ class ModelRenderer(Widget):
       return
     if self._carrot_show_lane_info == 1 and not np.any(lane_line_visible):
       return
+
+    now = time.monotonic()
+    dt = max(0.001, min(0.1, now - getattr(self, '_carrot_last_dash_time', now)))
+    self._carrot_last_dash_time = now
+
+    v_ego = max(0.0, float(getattr(car_state, 'vEgo', 0.0)))
+    cycle = LANE_DASH_LENGTH_M + LANE_DASH_GAP_M
+    if v_ego > 0.1:
+      self._carrot_dash_offset = (getattr(self, '_carrot_dash_offset', 0.0) - v_ego * dt) % cycle
 
     max_distance = float(np.clip(lane_zero[-1, 0], MIN_DRAW_DISTANCE, MAX_DRAW_DISTANCE))
     max_idx = self._get_path_length_idx(lane_zero[:, 0], max_distance)
@@ -928,7 +1164,7 @@ class ModelRenderer(Widget):
       is_dashed = lane_code is not None and lane_code >= 0 and lane_code % 10 == 0
       if is_dashed:
         projected_segments = project_lane_segments(
-          lane_dash_segments(lane_line.raw_points, max_distance), line_width, self._car_space_transform, self._clip_region,
+          lane_dash_segments(lane_line.raw_points, max_distance, offset=getattr(self, '_carrot_dash_offset', 0.0)), line_width, self._car_space_transform, self._clip_region,
         )
       else:
         pts = self._map_line_to_polygon(
@@ -1009,8 +1245,31 @@ class ModelRenderer(Widget):
       self._carrot_lane_barrier_vertices[1] = self._build_blind_spot_barrier_carrot(model_position, 1.7)
 
   def _draw_blind_spot_segments_carrot(self, points: np.ndarray, color: rl.Color):
-    for quad in blindspot_barrier_quads(points):
-      self._draw_polygon_points_carrot(quad, color, False, 10)
+    if points is None or points.shape[0] < 2:
+      return
+
+    # 화면 중심 기준 좌측/우측 판별
+    rect = getattr(self, '_rect', None)
+    rect_w = float(rect.width) if rect is not None else 2160.0
+    rect_h = float(rect.height) if rect is not None else 1080.0
+    cx_screen = rect_w / 2.0
+    first_pt = points[0]
+    side_sign = -1.0 if float(first_pt[0]) < cx_screen else 1.0
+
+    # 차선 옆/차량 후측방 위치 앵커 계산:
+    # 도로 투영 좌표계에 부드럽게 연동되도록 first_pt 기준 배치
+    anchor_x = float(first_pt[0])
+    anchor_y = float(first_pt[1])
+
+    # 화면 경계 안전 클램핑
+    anchor_x = float(np.clip(anchor_x, 160.0, rect_w - 160.0))
+    anchor_y = float(np.clip(anchor_y, 350.0, rect_h - 100.0))
+
+    # 현대/제네시스 순정 HUD 스타일 3겹 와이파이(레이더 파형 호) + 삼각 느낌표 경고 아이콘
+    from openpilot.selfdrive.ui.onroad import view_3d_draw
+    view_3d_draw.draw_blindspot_radar_wave(
+      anchor_x, anchor_y, side_sign, color=color, scale=1.0, alpha=1.0, show_triangle=True,
+    )
 
 
   @staticmethod
@@ -1512,7 +1771,8 @@ class ModelRenderer(Widget):
     else:
       self._draw_animated_path_carrot(sm, show_path_mode, show_path_color, brake_valid)
 
-    self._render_diagnostics.call('path_labels', self._draw_path_end_overlay_carrot)
+    # 타이어 궤적을 먼저 그리고, 차선/마커 뒤에 _draw_carrot_overlays에서 선행차 오버레이(path_labels)를 그려
+    # 차선과 타이어 궤적이 선행차 이미지를 덮지 않도록 순서 보장
     self._render_diagnostics.call('tire', self._draw_tire_trajectory_carrot, sm)
 
   @staticmethod
@@ -1583,8 +1843,10 @@ class ModelRenderer(Widget):
     radar_state = sm['radarState'] if sm.valid['radarState'] else None
     if radar_state is not None and radar_state.leadOne.status:
       d_rel = float(radar_state.leadOne.dRel)
-      if 3.0 < d_rel < max_dist:
-        max_dist = d_rel
+      # 타이어 궤적이 선행차 타이어 이미지를 덮지 않고 차량 아래/앞까지만 표시되도록 차간거리 마진 적용
+      lead_cutoff = max(2.0, d_rel - 1.5)
+      if lead_cutoff < max_dist:
+        max_dist = lead_cutoff
     max_idx = self._get_path_length_idx(path[:, 0], max_dist)
     if max_idx < 5:
       return
@@ -1627,3 +1889,236 @@ class ModelRenderer(Widget):
         white = rl.Color(255, 255, 255, 255)
         draw_text_ui_style(dir_label, tx, ty - 56.0, 72, white, font=self._font_display, align="center", y_offset=0.0)
         draw_text_ui_style(dist_str, tx, ty + 18.0, 52, white, font=self._font_display, align="center", y_offset=0.0)
+  def _draw_3d_view_visualization(self, sm):
+    """3D view: virtual chase camera that widens near close leads and sharp curves."""
+    if not sm.valid['modelV2']:
+      return
+    if hasattr(self, '_refresh_carrot_params'):
+      self._refresh_carrot_params(rl.get_time())
+    if not hasattr(self, '_view_3d_scene'):
+      self._view_3d_scene = View3dScene(C3_SIZES)
+    is_night = getattr(self, '_view_3d_is_night', getattr(self, '_fsd_is_night', True))
+    self._view_3d_scene.draw(self, sm, self._rect, is_night)
+
+  def _draw_vr_view_visualization(self, sm):
+    """VR view: 3rd-person chase-camera driving visualization."""
+    if not sm.valid['modelV2']:
+      return
+    if hasattr(self, '_refresh_carrot_params'):
+      self._refresh_carrot_params(rl.get_time())
+    if not hasattr(self, '_view_vr_scene'):
+      self._view_vr_scene = ViewVrScene(is_compact=False)
+    is_night = getattr(self, '_view_3d_is_night', getattr(self, '_fsd_is_night', True))
+    self._view_vr_scene.draw(self, sm, self._rect, is_night)
+
+  def _resolve_traffic_light(self, sm, raw: np.ndarray, v_ego: float, now: float) -> tuple[str, float, int]:
+    """Resolve active traffic light state ('red', 'yellow', 'left', 'green'), calibrated distance (m), and remaining seconds."""
+    # Source 1: C-ITS / CarrotNavi TrafficLight in params_memory
+    params_mem = getattr(ui_state, 'params_memory', None)
+    if params_mem is not None:
+      try:
+        raw_json = params_mem.get("TrafficLight", encoding="utf-8")
+        if raw_json:
+          tl = json.loads(raw_json)
+          raw_lamp = str(tl.get("lamp", "")).strip().lower()
+          raw_dist = float(tl.get("distance", 0.0) or 0.0)
+          raw_remain = int(float(tl.get("remain", 0) or 0))
+          ts = float(tl.get("ts", 0.0) or 0.0)
+          if ts == 0.0 or 0.0 <= now - ts <= 3.0:
+            if ts != getattr(self, '_carrot_tl_raw_ts', 0.0) or abs(raw_dist - getattr(self, '_carrot_tl_raw_dist', 0.0)) > 0.5:
+              age = max(0.0, now - ts) if ts > 0.0 else 0.0
+              self._carrot_tl_raw_ts = ts
+              self._carrot_tl_raw_dist = raw_dist
+              self._carrot_tl_est_dist = max(0.0, raw_dist - v_ego * min(age, 2.5))
+              self._carrot_tl_last_t = now
+            else:
+              dt = float(np.clip(now - getattr(self, '_carrot_tl_last_t', now), 0.0, 0.25))
+              self._carrot_tl_est_dist = max(0.0, self._carrot_tl_est_dist - v_ego * dt)
+              self._carrot_tl_last_t = now
+            remain_now = max(0, int(raw_remain - (now - ts))) if (raw_remain > 0 and ts > 0.0) else max(0, raw_remain)
+            lamp_map = {
+              "red": "red",
+              "yellow": "yellow",
+              "left": "left",
+              "red_left": "red_left",
+              "green": "green",
+              "green_left": "green_left",
+              "right": "green",
+              "uturn": "green",
+            }
+            lamp_mapped = lamp_map.get(raw_lamp, "")
+            if lamp_mapped and 0.5 <= self._carrot_tl_est_dist <= 130.0:
+              return lamp_mapped, float(self._carrot_tl_est_dist), remain_now
+      except Exception:
+        pass
+
+    # Source 2: Planner / vision signal fallback
+    lp = sm['longitudinalPlan'] if sm.valid.get('longitudinalPlan', False) else None
+    cm = sm['carrotMan'] if sm.valid.get('carrotMan', False) else None
+    traffic_state = int(getattr(lp, 'trafficState', 0) or 0) if lp is not None else 0
+    cm_state = int(getattr(cm, 'trafficState', 0) or 0) if cm is not None else 0
+    obs_color = int(getattr(lp, 'signalObservationColor', 0) or 0) if lp is not None else 0
+    x_state_str = str(getattr(lp, 'xState', '')) if lp is not None else ''
+
+    if cm_state == 3:
+      lamp_state = "left"
+    elif traffic_state == 1 or cm_state == 1 or obs_color == 1 or x_state_str in ('e2eStop', 'e2eStopped', '3', '5'):
+      lamp_state = "red"
+    elif obs_color == 3 or x_state_str in ('e2eStopPrepare', '6'):
+      lamp_state = "yellow"
+    elif traffic_state == 2 or cm_state == 2 or obs_color == 2:
+      lamp_state = "green"
+    else:
+      return "", 0.0, 0
+
+    explicit_stop = float(getattr(lp, 'xStop', 0.0) or 0.0) if lp is not None else 0.0
+    if explicit_stop > 0.0:
+      stop_dist = explicit_stop
+    elif len(raw) > 0:
+      cam_to_bumper = float(getattr(self, '_carrot_cam_to_bumper_m', 1.52))
+      model_stop_x = max(0.0, float(raw[min(31, len(raw) - 1), 0]) - cam_to_bumper)
+      adjust = float(np.interp(v_ego * 3.6, [0.0, 100.0], [1.0, 0.7]))
+      stop_dist = max(0.0, model_stop_x * float(np.interp(model_stop_x, [0.0, 50.0], [1.0, adjust])))
+      if x_state_str in ('e2eStopped', '5') and v_ego < 0.5:
+        stop_dist = min(stop_dist, 8.0) if stop_dist > 0.0 else 4.0
+    else:
+      stop_dist = 0.0
+
+    if not (1.0 <= stop_dist <= 120.0):
+      return "", 0.0, 0
+    return lamp_state, float(stop_dist), 0
+
+  def _draw_road_markers_carrot(self, sm) -> None:
+    is_3d = getattr(self, '_view_3d_mode', False) or getattr(self, '_fsd_mode', False)
+    is_night = getattr(self, '_view_3d_is_night', getattr(self, '_fsd_is_night', True))
+    path_obj = getattr(self, '_path', None)
+    raw = getattr(path_obj, 'raw_points', None) if path_obj is not None else None
+    if raw is None or len(raw) == 0:
+      return
+
+    from openpilot.selfdrive.ui.onroad import view_3d_draw
+
+    car_state = sm['carState'] if sm.valid.get('carState', False) else None
+    cm = sm['carrotMan'] if sm.valid.get('carrotMan', False) else None
+    v_ego = float(getattr(car_state, 'vEgo', 0.0) or 0.0) if car_state is not None else 0.0
+    now = time.monotonic()
+    cam_to_bumper = float(getattr(self, '_carrot_cam_to_bumper_m', 1.52))
+    road_z_off = float(getattr(self, '_path_offset_z', 1.22))
+    xs = raw[:, 0]
+
+    # 1. Speed bump on lower road surface (continuous from initial detection until passed)
+    raw_bump = None
+    if car_state is not None:
+      cs_bump = float(getattr(car_state, 'speedBumpDistance', 0.0) or 0.0)
+      if SPEED_BUMP_DIST_OFFSET_M + 0.5 < cs_bump <= 130.0:
+        raw_bump = cs_bump - SPEED_BUMP_DIST_OFFSET_M
+    if raw_bump is None and cm is not None and getattr(cm, 'xSpdType', 0) == 22:
+      cm_dist = float(getattr(cm, 'xSpdDist', 0.0) or 0.0)
+      if SPEED_BUMP_DIST_OFFSET_M + 0.5 < cm_dist <= 130.0:
+        raw_bump = cm_dist - SPEED_BUMP_DIST_OFFSET_M
+
+    if raw_bump is not None:
+      if abs(raw_bump - getattr(self, '_carrot_bump_raw_dist', 0.0)) > 0.05 or getattr(self, '_carrot_bump_last_t', 0.0) <= 0.0:
+        self._carrot_bump_raw_dist = raw_bump
+        self._carrot_bump_est_dist = raw_bump
+        self._carrot_bump_last_t = now
+      else:
+        dt = float(np.clip(now - self._carrot_bump_last_t, 0.0, 0.25))
+        self._carrot_bump_est_dist = max(0.5, self._carrot_bump_est_dist - v_ego * dt)
+        self._carrot_bump_last_t = now
+      bump_dist = float(self._carrot_bump_est_dist)
+    else:
+      self._carrot_bump_raw_dist = 0.0
+      self._carrot_bump_est_dist = 0.0
+      self._carrot_bump_last_t = 0.0
+      bump_dist = 0.0
+
+    if 0.5 <= bump_dist <= 120.0:
+      x_cam = bump_dist + cam_to_bumper
+      by = float(np.interp(x_cam, xs, raw[:, 1]))
+      bz = float(np.interp(x_cam, xs, raw[:, 2])) + road_z_off
+      p_left = self._project_point_unclipped(x_cam, by - 1.65, bz)
+      p_right = self._project_point_unclipped(x_cam, by + 1.65, bz)
+      if p_left is not None and p_right is not None:
+        cx = 0.5 * (p_left[0] + p_right[0])
+        cy = 0.5 * (p_left[1] + p_right[1])
+        bump_w = float(np.clip(abs(p_right[0] - p_left[0]), 52.0, self._rect.width * 0.92))
+        if self._rect.y <= cy <= self._rect.y + self._rect.height + 40.0:
+          view_3d_draw.draw_road_speed_bump_texture(
+            cx, min(cy, self._rect.y + self._rect.height - 28.0), bump_w, bump_dist, is_night,
+          )
+
+    # 2. Overhead 4-lamp Korean traffic light in upper view & road stop line
+    tl_lamp, tl_dist, tl_remain = self._resolve_traffic_light(sm, raw, v_ego, now)
+    overhead_drawn = False
+    if tl_lamp and 0.5 <= tl_dist <= 130.0:
+      x_cam = tl_dist + cam_to_bumper
+      sy = float(np.interp(x_cam, xs, raw[:, 1]))
+      sz_road = float(np.interp(x_cam, xs, raw[:, 2])) + road_z_off
+      sz_overhead = sz_road - 4.8
+      p_over = self._project_point_unclipped(x_cam, sy, sz_overhead)
+      p_rl = self._project_point_unclipped(x_cam, sy - 1.65, sz_road)
+      p_rr = self._project_point_unclipped(x_cam, sy + 1.65, sz_road)
+
+      if p_rl is not None and p_rr is not None:
+        raw_tl_w = abs(p_rr[0] - p_rl[0]) * 0.55
+      else:
+        raw_tl_w = 1800.0 / max(8.0, tl_dist)
+      tl_w = float(np.clip(raw_tl_w, 105.0, min(260.0, self._rect.width * 0.14)))
+      tl_h = tl_w * (174.0 / 581.0)
+
+      tl_cx = float(np.clip(
+        p_over[0] if p_over is not None else (self._rect.x + self._rect.width * 0.5),
+        self._rect.x + self._rect.width * 0.22,
+        self._rect.x + self._rect.width * 0.78,
+      ))
+      tl_cy = float(np.clip(
+        p_over[1] if p_over is not None else (self._rect.y + self._rect.height * 0.25),
+        self._rect.y + max(self._rect.height * 0.24, tl_h * 1.4),
+        self._rect.y + self._rect.height * 0.43,
+      ))
+
+      if tl_lamp in ('red', 'yellow') and p_rl is not None and p_rr is not None and 1.5 <= tl_dist <= 120.0:
+        line_y = 0.5 * (p_rl[1] + p_rr[1])
+        if self._rect.y < line_y <= self._rect.y + self._rect.height:
+          rl.draw_line_ex(rl.Vector2(p_rl[0], p_rl[1]), rl.Vector2(p_rr[0], p_rr[1]), 5.0, rl.Color(255, 65, 65, 220))
+
+      view_3d_draw.draw_overhead_traffic_light_4lamp(tl_cx, tl_cy, tl_w, tl_lamp, tl_dist, tl_remain, is_night)
+      overhead_drawn = True
+
+    if is_3d and not overhead_drawn:
+      if not hasattr(self, '_view_3d_scene'):
+        self._view_3d_scene = View3dScene(C3_SIZES)
+      self._view_3d_scene.draw_traffic_light_badge(self._rect, sm, 1.0 / 20.0)
+
+    # 3. Approaching Speed Camera Sign & >110% Overspeed Warning in 3D View
+    if is_3d:
+      cam_state = getattr(self, '_carrot_cam_state', None)
+      if cam_state is None:
+        cam_state = {}
+        self._carrot_cam_state = cam_state
+      cam_limit, cam_dist, cam_active = view_3d_draw.resolve_speed_camera_state(sm, v_ego, now, cam_state)
+      overspeed = cam_active and cam_limit > 0 and (v_ego * 3.6) > cam_limit * 1.10
+      self._last_3d_speed_cam = (cam_limit, cam_dist, overspeed) if cam_active else None
+      if overspeed:
+        pulse = 0.35 + 0.65 * (0.5 + 0.5 * math.sin(now * 6.5))
+        y_road = int(self._rect.y + self._rect.height * 0.48)
+        h_road = max(1, int(self._rect.height - (y_road - self._rect.y)))
+        rl.draw_rectangle_gradient_v(
+          int(self._rect.x), y_road, int(self._rect.width), h_road,
+          rl.Color(235, 60, 60, int(18 * pulse)), rl.Color(235, 50, 50, int(85 * pulse)),
+        )
+      if cam_limit > 0 and 0.5 <= cam_dist <= 500.0:
+        d_cam = min(cam_dist, max(1.0, float(xs[-1]) - cam_to_bumper)) + cam_to_bumper
+        sy_cam = float(np.interp(d_cam, xs, raw[:, 1])) + 2.6
+        sz_cam = float(np.interp(d_cam, xs, raw[:, 2])) + road_z_off - 5.2
+        p_cam = self._project_point_unclipped(d_cam, sy_cam, sz_cam)
+        sign_r = float(np.clip(820.0 / max(8.5, cam_dist), 22.0, 92.0))
+        cam_cx = float(p_cam[0]) if p_cam is not None else float(self._rect.x + self._rect.width * 0.62)
+        cam_cy = float(p_cam[1]) if p_cam is not None else float(self._rect.y + self._rect.height * 0.23)
+        min_cam_cx = self._rect.x + self._rect.width * 0.60 if overhead_drawn else self._rect.x + self._rect.width * 0.18
+        cam_cx = float(np.clip(cam_cx, min_cam_cx, self._rect.x + self._rect.width * 0.86))
+        cam_cy = float(np.clip(cam_cy, self._rect.y + sign_r + 12.0, max(self._rect.y + sign_r + 14.0, self._rect.y + self._rect.height * 0.30)))
+        view_3d_draw.draw_speed_camera_sign(cam_cx, cam_cy, sign_r, cam_limit, cam_dist, overspeed, is_night)
+
+  _draw_fsd_visualization = _draw_3d_view_visualization

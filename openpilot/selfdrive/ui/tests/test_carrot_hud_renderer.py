@@ -659,3 +659,50 @@ def test_vehicle_navigation_profile_does_not_force_speed_with_cruise_off(hud_mod
   assert override.label == "MAX"
   assert override.speed_color_mode == 0
   assert not override.force_persist
+
+
+def test_speed_limit_info_reads_xspd_type(hud_module):
+  module, fake_ui_state = hud_module
+
+  class FakeSM(dict):
+    valid = {"carrotMan": True}
+
+  fake_ui_state.sm = FakeSM({"carrotMan": SimpleNamespace(xSpdLimit=35, xSpdType=22, nRoadLimitSpeed=50)})
+  renderer = object.__new__(module.HudRenderer)
+
+  spd_limit, sign_type, road_limit = renderer._get_speed_limit_info()
+
+  assert spd_limit == 35
+  assert sign_type == 22
+  assert road_limit == 50
+
+
+def test_traffic_light_and_speed_bump_draw_on_screen(hud_module, monkeypatch):
+  module, fake_ui_state = hud_module
+
+  class FakeSM(dict):
+    valid = {"carrotMan": True, "carState": True, "longitudinalPlan": True}
+
+  fake_ui_state.sm = FakeSM({
+    "carrotMan": SimpleNamespace(xSpdLimit=35, xSpdType=22, xSpdDist=42, nRoadLimitSpeed=50, trafficState=1, trafficStateCarrot=0),
+    "carState": SimpleNamespace(speedBumpDistance=42.0),
+    "longitudinalPlan": SimpleNamespace(trafficState=1),
+  })
+
+  renderer = object.__new__(module.HudRenderer)
+  renderer._traffic_red_icon = SimpleNamespace(width=256, height=256)
+  renderer._traffic_green_icon = SimpleNamespace(width=256, height=256)
+  renderer._speed_bump_icon = SimpleNamespace(width=120, height=150)
+  renderer._font_bold = None
+  draws = []
+  monkeypatch.setattr(renderer, "_draw_texture_rect", lambda tex, x, y, w, h: draws.append((tex, x, y, w, h)))
+  monkeypatch.setattr(module, "draw_text_ui_style", lambda *a, **k: None)
+
+  bx, by = 140, 850  # 2160x1080 anchor
+  renderer._draw_carrot_traffic_light(bx, by)
+  renderer._draw_carrot_speed_bump(bx, by, (35, 22, 50))
+
+  assert len(draws) == 2
+  for _tex, x, y, w, h in draws:
+    assert 0 <= x and x + w <= 2160
+    assert 0 <= y and y + h <= 1080

@@ -10,7 +10,7 @@ LANE_DASH_LENGTH_M = 5.2
 LANE_DASH_GAP_M = 4.2
 
 
-def lane_dash_segments(line: np.ndarray, max_distance: float) -> list[np.ndarray]:
+def lane_dash_segments(line: np.ndarray, max_distance: float, offset: float = 0.0) -> list[np.ndarray]:
   if line.shape[0] < 2:
     return []
 
@@ -22,7 +22,8 @@ def lane_dash_segments(line: np.ndarray, max_distance: float) -> list[np.ndarray
 
   boundaries = []
   cycle_distance = LANE_DASH_LENGTH_M + LANE_DASH_GAP_M
-  cursor = math.floor(start_distance / cycle_distance) * cycle_distance
+  eff_offset = offset % cycle_distance
+  cursor = (math.floor((start_distance - eff_offset) / cycle_distance)) * cycle_distance + eff_offset
   while cursor < end_distance:
     dash_start = max(cursor, start_distance)
     dash_end = min(cursor + LANE_DASH_LENGTH_M, end_distance)

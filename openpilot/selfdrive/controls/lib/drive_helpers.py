@@ -418,34 +418,44 @@ def compute_curve_inner_curvature_assist(base_curvature, yaws, yaw_rates, t_idxs
   intrusion_blend = 0.0
   if lane_est is not None:
     target_y = y_center + curve_sign * max_inner_shift
-    lookahead_dist = float(np.clip(v_ego * 0.95, 9.0, 24.0))
+    lookahead_dist = float(np.clip(v_ego * 1.15, 11.5, 26.0))
     pure_pursuit_curv = (2.0 * target_y) / (lookahead_dist ** 2)
 
     inner_overshoot = max(0.0, -drift_metric - max_inner_shift)
-    line_intrusion = max(0.0, 1.20 - inside_clearance)
+    line_intrusion = max(0.0, 0.95 - inside_clearance)
     if drift_metric > 0.02 and line_intrusion <= 0.0:
       # Drifting toward outside of curve: corrective recovery (tapered on tight high-curvature turns)
       is_outer_drift = True
       outer_boost = float(np.interp(abs(base), [0.008, 0.018], [1.45, 1.05]))
       delta_kappa_lane = lane_conf * ramp * s_curve_factor * apex_factor * (0.60 + 0.40 * bias_strength) * outer_boost * pure_pursuit_curv
     elif drift_metric < -max_inner_shift or line_intrusion > 0.0:
-      # Already hugging or crossing inside lane line: smoothly escalate outward centering to stay inside lane
+      # Gently ease outward when inside target, escalating progressively only near the inside line
       intrusion_blend = max(
-        float(np.interp(line_intrusion, [0.0, 0.45], [0.0, 1.0])),
-        float(np.interp(inner_overshoot, [0.25, 0.75], [0.0, 1.0])),
+        float(np.interp(line_intrusion, [0.0, 0.50], [0.0, 1.0])),
+        float(np.interp(inner_overshoot, [0.45, 1.15], [0.0, 1.0])),
       )
-      inner_gain = float(np.interp(intrusion_blend, [0.0, 1.0], [0.25, 1.15]))
+      inner_gain = float(np.interp(intrusion_blend, [0.0, 1.0], [0.16, 0.95]))
       delta_kappa_lane = lane_conf * max(ramp, intrusion_blend) * inner_gain * pure_pursuit_curv
     else:
       # Centered or mild inside: gentle guidance only at entry
       delta_kappa_lane = lane_conf * ramp * s_curve_factor * apex_factor * high_curv_taper * 0.45 * pure_pursuit_curv
 
-  outer_headroom = 1.30 if is_outer_drift else float(np.interp(intrusion_blend, [0.0, 1.0], [1.0, 2.60]))
+  outer_headroom = 1.25 if is_outer_drift else float(np.interp(intrusion_blend, [0.0, 1.0], [1.0, 2.40]))
   max_delta = (0.28 + 0.42 * bias_strength) * max(ramp, intrusion_blend) * outer_headroom / max(v_ego ** 2, 25.0)
   raw_delta = delta_kappa_lead + delta_kappa_lane
-  # Never let outward inside-line correction reverse the curve direction
-  if intrusion_blend > 0.0 and (raw_delta * curve_sign) < 0.0 and abs(base) > 0.004:
-    max_delta = min(max_delta, 0.45 * abs(base))
+  # Dampen mid-curve outward unwind while the curve ahead is still holding/tightening with safe inside clearance
+  if (
+    (raw_delta * curve_sign) < 0.0
+    and (preview_curvature * curve_sign) > 0.0
+    and abs(preview_curvature) >= 0.85 * abs(base)
+    and lane_est is not None
+  ):
+    tightening_damp = float(np.interp(inside_clearance, [0.65, 1.05], [1.0, 0.65]))
+    raw_delta *= tightening_damp
+  # Never let outward inside-line correction collapse or reverse the curve mid-turn
+  if (raw_delta * curve_sign) < 0.0 and abs(base) > 0.004:
+    max_outward_frac = float(np.interp(intrusion_blend, [0.0, 1.0], [0.15, 0.38]))
+    max_delta = min(max_delta, max_outward_frac * abs(base))
   delta_kappa = float(np.clip(raw_delta, -max_delta, max_delta))
   return float(base + delta_kappa)
 

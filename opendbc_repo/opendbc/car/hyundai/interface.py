@@ -35,18 +35,20 @@ class CarInterface(CarInterfaceBase):
 
     params = Params()
     camera_scc = params.get_int("HyundaiCameraSCC")
+    hda2 = params.get_int("CanfdHDA2") > 0
     if camera_scc > 0:
       ret.flags |= HyundaiFlags.CAMERA_SCC.value
       print("$$$CAMERA_SCC toggled...")
+    elif hda2 and ret.flags & HyundaiFlags.CANFD:
+      # A stock HDA2 harness reads SCC on ECAN. A platform's HDA1 camera
+      # default must not override the explicitly selected harness topology.
+      ret.flags &= ~HyundaiFlags.CAMERA_SCC.value
 
     ret.brand = "hyundai"
 
     if candidate == CAR.KIA_SORENTO:
       ret.extFlags |= HyundaiExtFlags.RADAR_GROUP4.value
 
-    cam_can = CanBus(None, fingerprint).CAM if camera_scc == 0 else 1
-    hda2 = False #0x50 in fingerprint[cam_can] or 0x110 in fingerprint[cam_can]
-    hda2 = hda2 or params.get_int("CanfdHDA2") > 0
     CAN = CanBus(None, fingerprint, hda2)
 
     # Prefer the current camera wiring, while supporting recorded src=1 wiring.
@@ -146,10 +148,20 @@ class CarInterface(CarInterfaceBase):
       if CAN.ECAN >= 4:
         cfgs.insert(0, get_safety_config(structs.CarParams.SafetyModel.noOutput))
       ret.safetyConfigs = cfgs
-      from opendbc.car.hyundai.spas import compatible
+      from opendbc.car.hyundai.spas import compatible, kick_compatible
+      # Select by the observed protocol and harness, never the model name.
+      # Runtime CRC/counter/driver checks still precede each new Kick request.
+      kick = kick_compatible(fingerprint, CAN.ECAN, ret.flags & HyundaiFlags.CAMERA_SCC) and params.get_bool("CanfdBlinkerKick")
+      if ret.flags & HyundaiFlags.CAMERA_SCC and fingerprint[CAN.CAM].get(0x1EA) == 32:
+        ret.extFlags |= HyundaiExtFlags.CANFD_INDICATOR_HOLD.value
+      if not docs and kick and params.get_bool("CanfdBlinkerControl"):
+        params.put_bool("CanfdBlinkerControl", False)
       if params.get_bool("CanfdBlinkerControl") and compatible(fingerprint, CAN.ECAN) and not ret.flags & HyundaiFlags.ENABLE_BLINKERS:
         ret.flags |= HyundaiFlags.CANFD_SPAS_BLINKERS.value
         ret.safetyConfigs[-1].safetyParam |= HyundaiSafetyFlags.CANFD_SPAS_BLINKERS.value
+      if kick:
+        # panda admits the Kick ids only with this flag; read at fingerprint time, so it applies from the next onroad start
+        ret.safetyConfigs[-1].safetyParam |= HyundaiSafetyFlags.CANFD_BLINKER_KICK.value
 
 
       if ret.flags & HyundaiFlags.CANFD_HDA2:

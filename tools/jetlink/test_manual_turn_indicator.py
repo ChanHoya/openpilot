@@ -7,7 +7,34 @@ from blink_observation import allowed
 from test_indicator_reconstruction import scene
 from openpilot.selfdrive.controls.lib.desire_lib.boundary_indicator import BoundaryIndicator
 from openpilot.selfdrive.controls.lib.desire_lib.indicator_observer import ModelIndicator, following_road_curve
-from openpilot.selfdrive.controls.lib.desire_lib.manual_turn_indicator import ManualTurnMovement
+from openpilot.selfdrive.controls.lib.desire_lib.manual_turn_indicator import ManualTurnIndicator, ManualTurnMovement
+
+
+@pytest.mark.parametrize('fault', [None, 'curve', 'expired', 'unwind', 'released', 'opposite', 'post_ready_peak'])
+def test_rearm_peak_memory_is_bounded_to_a_confirmed_blocked_turn(fault):
+  cs, _ = scene()
+  cs.vEgo, cs.steeringPressed, cs.steeringTorque = 5., True, -400.
+  detector = ManualTurnIndicator()
+  emitted, pending = [], False
+  for i in range(60):
+    cs.steeringAngleDeg = -min(300., i*8.)
+    if fault == 'post_ready_peak':
+      cs.steeringAngleDeg = -(min(110., i*8.) + max(0, min(i-20, 23)))
+    if i >= 38:
+      if fault == 'unwind':
+        cs.steeringAngleDeg = -290.
+      elif fault == 'released':
+        cs.steeringPressed = False
+      elif fault == 'opposite':
+        cs.steeringTorque = 400.
+    result = detector.update(10.+i*.05, cs, i, .2, allowed=True,
+      following_curve=fault == 'curve' and i >= 38,
+      emit_allowed=i >= (46 if fault == 'expired' else 40), require_growth=True)
+    pending |= detector.pending_growth
+    if result:
+      emitted.append(i)
+  assert pending  # The fault must invalidate a previously confirmed turn.
+  assert bool(emitted) == (fault is None)
 
 
 def drive(direction=1, fault=None):
@@ -92,9 +119,9 @@ def test_moderate_driver_turn_requests_indicator(direction):
   assert drive(direction, 'moderate_turn')[4]
 
 
-def test_low_speed_lane_relabels_do_not_hide_an_independent_manual_turn():
+def test_lane_relabels_do_not_hide_an_independent_manual_turn():
   assert drive(fault='slow_relabel')[4]
-  assert not drive(fault='fast_relabel')[4]
+  assert drive(fault='fast_relabel')[4]
 
 
 @pytest.mark.parametrize('last_lamp', [0., 1.75])
@@ -168,6 +195,39 @@ def test_recognized_road_bend_is_excluded():
     assert detector.update(10 + i * .05, cs, i, .05, allowed=True,
                            following_curve=following_road_curve(md, 5., .05)) is None
   assert detector.reason == 'road_curve'
+
+
+@pytest.mark.parametrize('curvature', [-.01, .01])
+def test_real_cereal_curve_geometry_is_read_without_list_slices(curvature):
+  from openpilot.cereal import log
+  md = log.ModelDataV2.new_message()
+  md.laneLineProbs = [.9] * 4
+  xs = [0., 5., 10., 15., 20.]
+  md.laneLines = [{'x':xs, 'y':[offset+.5*curvature*x*x for x in xs]} for offset in (-5.4, -1.8, 1.8, 5.4)]
+  with log.ModelDataV2.from_bytes(md.to_bytes()) as recorded:
+    assert following_road_curve(recorded, 5., curvature*5.)
+    assert not following_road_curve(recorded, 5., -curvature*5.)
+
+
+@pytest.mark.parametrize('direction', [1, 2])
+@pytest.mark.parametrize('fault', [None, 'stale_motion', 'already_held', 'released'])
+def test_driver_resumed_turn_measures_growth_within_current_intent(direction, fault):
+  from openpilot.selfdrive.controls.lib.desire_lib.manual_turn_indicator import ManualTurnIndicator
+  cs, _ = scene()
+  detector = ManualTurnIndicator()
+  sign = 1 if direction == 1 else -1
+  cs.vEgo = 5.
+  requests = []
+  for i in range(50):
+    now = 10+i*.05
+    angle = 100. if i < 20 else max(70., 100.-(i-20)*5.) if i < 30 else min(105., 70.+(i-30)*5.)
+    cs.steeringAngleDeg = sign*(100. if fault == 'already_held' else angle)
+    cs.steeringPressed = i >= 10 and not (fault == 'released' and i >= 20)
+    cs.steeringTorque = sign*400 if cs.steeringPressed else 0.
+    movement = detector.update(now, cs, i, -sign*.2, allowed=not (fault == 'stale_motion' and 20 <= i <= 35))
+    if movement:
+      requests.append(movement)
+  assert bool(requests) == (fault is None)
 
 
 def test_turn_promotes_manual_lane_observation_without_another_request():
@@ -256,7 +316,8 @@ def test_source_loop_uses_independent_option_with_lateral_control_off(monkeypatc
     get=lambda _: b'cp', get_int=lambda key: 1 if key == 'AutoBlinkerControl' else atc if key == 'AutoTurnControl' else 0,
     get_bool=lambda key: enabled and key == 'ManualTurnIndicator')))
   monkeypatch.setitem(sys.modules, 'openpilot.cereal', N(messaging=N(SubMaster=lambda _: sm),
-    car=N(CarParams=N(from_bytes=lambda _: nullcontext(N(carFingerprint='HYUNDAI_IONIQ_5_PE'))))))
+    car=N(CarParams=N(from_bytes=lambda _: nullcontext(N(carFingerprint='PROTOCOL_MATCHED_CAR',
+      brand='hyundai', passive=False, openpilotLongitudinalControl=True, extFlags=1 << 19))))))
   sock = N(setblocking=lambda _: None, recv=receive, send=lambda raw: sent.append(json.loads(raw)))
   monkeypatch.setattr(source.socket, 'socket', lambda **kw: sock)
   monkeypatch.setattr(source.select, 'select', lambda *args: ([sock] if len(sent) not in received else [], [], []))
@@ -275,3 +336,19 @@ def test_source_loop_uses_independent_option_with_lateral_control_off(monkeypatc
     assert sent[2]['hold'] and sent[9]['hold'] and not sent[8]['hold']
     # Release the active hold, and never replay its old edge on resume.
     assert all(bool(value['hold']) is (not cancel) for value in sent[4:8])
+
+
+@pytest.mark.parametrize('speed', [-0.0004, -0.002, 0.])
+def test_confirmed_stop_keeps_owned_turn_despite_speed_estimator_noise(speed):
+  cs, md = scene()
+  cs.vEgo, cs.standstill = speed, True
+  assert allowed(cs, N(latActive=False), md, 'manual_turn', 10., holding=True)
+  assert not allowed(cs, N(latActive=False), md, 'manual_turn', 10., holding=False)
+
+
+@pytest.mark.parametrize('speed,standstill,gear', [(-.002, False, 'drive'), (-.2, True, 'drive'),
+                                                  (-.002, True, 'reverse')])
+def test_reverse_motion_still_ends_owned_turn(speed, standstill, gear):
+  cs, md = scene()
+  cs.vEgo, cs.standstill, cs.gearShifter = speed, standstill, gear
+  assert not allowed(cs, N(latActive=False), md, 'manual_turn', 10., holding=True)

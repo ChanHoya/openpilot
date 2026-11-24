@@ -9,6 +9,7 @@ from . import (
   carrot_navi,
   cars,
   dashcam,
+  drive_reports,
   egpu_model,
   intro,
   mapbox_tokens,
@@ -59,6 +60,7 @@ def register_all(app: web.Application) -> None:
   system.register(app)
   terminal.register(app)
   dashcam.register(app)
+  drive_reports.register(app)
   egpu_model.register(app)
   screenrecord.register(app)
   tools.register(app)

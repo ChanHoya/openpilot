@@ -15,6 +15,8 @@ from openpilot.selfdrive.ui.overlay_state import OverlayState
 from openpilot.selfdrive.ui.onroad.cameraview import CameraView
 from openpilot.selfdrive.ui.onroad.view_3d_button import View3dButton, VIEW_MODE_VR
 from openpilot.selfdrive.ui.onroad.view_vr_scene import draw_vr_background
+from openpilot.selfdrive.carrot.drive_report import DriveReportStore, DriveReportTracker, normalize_gear_shifter
+from openpilot.selfdrive.ui.onroad.drive_report_dialog import DriveReportDialog, DriveReportMiniHud
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.text_draw import draw_text_ui_style
 from openpilot.common.transformations.camera import DEVICE_CAMERAS, DeviceCameraConfig, view_frame_from_device_frame
@@ -80,6 +82,14 @@ class AugmentedRoadView(CameraView):
       lambda: read_border_params(ui_state.params, ui_state.params_memory),
     )
 
+    self._drive_report_tracker = DriveReportTracker()
+    self._drive_report_store = DriveReportStore()
+    self._drive_report_mini_hud = DriveReportMiniHud()
+    self._drive_report_dialog: DriveReportDialog | None = None
+    self._last_drive_report_car_frame: int = -1
+    if hasattr(ui_state, "add_offroad_transition_callback"):
+      ui_state.add_offroad_transition_callback(self._on_drive_report_offroad)
+
   def _refresh_plot_mode(self, now: float) -> None:
     if now < self._plot_mode_next_t:
       return
@@ -95,6 +105,7 @@ class AugmentedRoadView(CameraView):
   def _render(self, rect):
     # plotMode 갱신(가끔 파일 읽기)은 drawTime 창 밖에서 — total을 오염시키지 않는다
     self._refresh_plot_mode(time.monotonic())
+    self._update_drive_report()
     # Only render when system is started to avoid invalid data access
     start_draw = time.monotonic()
     if not ui_state.started:
@@ -176,6 +187,11 @@ class AugmentedRoadView(CameraView):
     )
     self._view_3d_button.render(rl.Rectangle(btn_x, btn_y, btn_w, btn_h))
 
+    mini_hud = getattr(self, "_drive_report_mini_hud", None)
+    tracker = getattr(self, "_drive_report_tracker", None)
+    if mini_hud is not None and tracker is not None and getattr(self, "_drive_report_dialog", None) is None:
+      mini_hud.render(self._content_rect, tracker.get_live_stats())
+
     # End clipping region
     rl.end_scissor_mode()
 
@@ -200,6 +216,10 @@ class AugmentedRoadView(CameraView):
     timing.finish()
 
   def _handle_mouse_press(self, mouse_pos):
+    mini_hud = getattr(self, "_drive_report_mini_hud", None)
+    mini_rect = getattr(mini_hud, "rect", None) if mini_hud is not None else None
+    if mini_rect is not None and mini_rect.width > 0 and rl.check_collision_point_rec(mouse_pos, mini_rect):
+      return
     btn = self._view_3d_button
     if btn.is_pressed or rl.check_collision_point_rec(mouse_pos, btn.rect):
       return
@@ -209,14 +229,114 @@ class AugmentedRoadView(CameraView):
     if not self._hud_renderer.user_interacting() and self._click_callback is not None:
       self._click_callback()
 
+  def _open_drive_report_history(self, initial_history: bool = True) -> None:
+    if getattr(self, "_drive_report_dialog", None) is not None:
+      return
+    dialog: DriveReportDialog | None = None
+
+    def _on_dialog_close() -> None:
+      if self._drive_report_dialog is dialog:
+        self._drive_report_dialog = None
+
+    dialog = DriveReportDialog(
+      None,
+      on_close=_on_dialog_close,
+      store=self._drive_report_store,
+      initial_history=initial_history,
+    )
+    self._drive_report_dialog = dialog
+    gui_app.push_widget(dialog)
+
+  def _save_drive_report(self, report: dict, show_dialog: bool) -> None:
+    saved = self._drive_report_store.save_report(report)
+    if show_dialog:
+      dialog: DriveReportDialog | None = None
+
+      def _on_dialog_close() -> None:
+        if self._drive_report_dialog is dialog:
+          self._drive_report_dialog = None
+
+      dialog = DriveReportDialog(saved, on_close=_on_dialog_close, store=self._drive_report_store)
+      self._drive_report_dialog = dialog
+      gui_app.push_widget(dialog)
+
+  def _on_drive_report_offroad(self) -> None:
+    if ui_state.started:
+      return
+    try:
+      report = self._drive_report_tracker.finalize_if_eligible(time.time())
+      if report is not None:
+        self._save_drive_report(report, show_dialog=False)
+    except Exception:
+      pass
+
+  def _update_drive_report(self) -> None:
+    try:
+      if not ui_state.started:
+        return
+      sm = ui_state.sm
+      if sm is None or not sm.valid.get("carState", False):
+        return
+      car_frame = int(sm.recv_frame.get("carState", -1))
+      if car_frame == self._last_drive_report_car_frame and not sm.updated.get("carState", False):
+        return
+      self._last_drive_report_car_frame = car_frame
+
+      if getattr(ui_state, "CP", None) is not None and not self._drive_report_tracker.vehicle_name:
+        fp = str(getattr(ui_state.CP, "carFingerprint", "") or "").replace("_", " ").strip()
+        if fp:
+          self._drive_report_tracker.set_vehicle_name(fp)
+
+      car_state = sm["carState"]
+      car_control = sm["carControl"] if sm.valid.get("carControl", False) else None
+      selfdrive_state = sm["selfdriveState"] if sm.valid.get("selfdriveState", False) else None
+      controls_state = sm["controlsState"] if sm.valid.get("controlsState", False) else None
+
+      report = self._drive_report_tracker.update(
+        time.monotonic(),
+        car_state,
+        car_control=car_control,
+        selfdrive_state=selfdrive_state,
+        controls_state=controls_state,
+        wall_t=time.time(),
+      )
+      if report is not None:
+        self._save_drive_report(report, show_dialog=True)
+    except Exception:
+      pass
+
   def close(self):
-    self.model_renderer._overlay.close()
-    self._hud_renderer._overlay.close()
+    if getattr(self, "_drive_report_dialog", None) is not None:
+      self._drive_report_dialog.close_dialog()
+      self._drive_report_dialog = None
+    if getattr(self, "_drive_report_tracker", None) is not None:
+      try:
+        report = self._drive_report_tracker.finalize_if_eligible(time.time())
+        if report is not None:
+          self._save_drive_report(report, show_dialog=False)
+      except Exception:
+        pass
+    if mr := getattr(self, "model_renderer", None):
+      mr._overlay.close()
+    if hr := getattr(self, "_hud_renderer", None):
+      hr._overlay.close()
     if preview := getattr(self, 'driver_state_renderer', None):
       preview.close()
     super().close()
 
   def _handle_mouse_release(self, mouse_pos):
+    mini_hud = getattr(self, "_drive_report_mini_hud", None)
+    mini_rect = getattr(mini_hud, "rect", None) if mini_hud is not None else None
+    if mini_rect is not None and mini_rect.width > 0 and rl.check_collision_point_rec(mouse_pos, mini_rect):
+      try:
+        sm = ui_state.sm
+        if sm is not None and sm.valid.get("carState", False):
+          gear = normalize_gear_shifter(getattr(sm["carState"], "gearShifter", None))
+          if gear == "park":
+            self._open_drive_report_history(initial_history=True)
+      except Exception:
+        pass
+      return
     btn = self._view_3d_button
     if btn.is_pressed or rl.check_collision_point_rec(mouse_pos, btn.rect):
       return

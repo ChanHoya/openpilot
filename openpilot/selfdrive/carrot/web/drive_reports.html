@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>CarrotPilot 주행 품질 리포트</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b111e;
+      --surface: #131b2e;
+      --surface-alt: #1a243b;
+      --border: #2a3958;
+      --text: #f1f5f9;
+      --muted: #94a3b8;
+      --auto: #22c55e;
+      --steer: #f59e0b;
+      --pedal: #3b82f6;
+      --danger: #ef4444;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 500 16px/1.5 -apple-system, BlinkMacSystemFont, "Pretendard", "Apple SD Gothic Neo", sans-serif;
+    }
+
+    main {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 24px 16px 48px;
+      display: grid;
+      gap: 20px;
+    }
+
+    .topbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 18px 22px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+    }
+
+    .topbar h1 {
+      margin: 0;
+      font-size: 1.35rem;
+      line-height: 1.3;
+    }
+
+    .topbar p {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .topbar-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .card {
+      container-type: inline-size;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 20px 22px;
+      display: grid;
+      gap: 16px;
+    }
+
+    .card-header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .card-header h3 {
+      margin: 0;
+      font-size: 1.1rem;
+    }
+
+    .hint {
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 6px 12px;
+      border-radius: 999px;
+      font-size: 0.85rem;
+      font-weight: 700;
+      border: 1px solid #166534;
+      background: #143624;
+      color: #4ade80;
+    }
+
+    .btn-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 44px;
+      padding: 8px 16px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--surface-alt);
+      color: var(--text);
+      font: inherit;
+      font-weight: 700;
+      font-size: 0.92rem;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    .btn--danger { background: #7f1d1d; border-color: #dc2626; color: #fee2e2; }
+    .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+    button:focus-visible, a:focus-visible { outline: 3px solid #60a5fa; outline-offset: 2px; }
+
+    .status-banner {
+      padding: 12px 14px;
+      border-radius: 10px;
+      border: 1px solid #166534;
+      background: #122d1f;
+      color: #86efac;
+      font-size: 0.92rem;
+    }
+    .status-banner[hidden] { display: none; }
+
+    .reports-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .reports-toolbar h2 { margin: 0; font-size: 1.15rem; }
+
+    .reports-list {
+      display: grid;
+      gap: 16px;
+    }
+
+    .ratio-bar {
+      height: 14px;
+      border-radius: 999px;
+      background: #0d1424;
+      overflow: hidden;
+      display: flex;
+    }
+    .ratio-seg--auto { background: var(--auto); }
+    .ratio-seg--steer { background: var(--steer); }
+    .ratio-seg--pedal { background: var(--pedal); }
+
+    .legend-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      font-size: 0.9rem;
+      font-weight: 700;
+    }
+    .legend-item { display: inline-flex; align-items: center; gap: 7px; }
+    .legend-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+    .legend-icons { display: inline-flex; align-items: center; gap: 3px; }
+    .legend-icon { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; flex-shrink: 0; }
+
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+      gap: 12px;
+    }
+    .metric-box {
+      padding: 12px 14px;
+      border-radius: 10px;
+      background: var(--surface-alt);
+      border: 1px solid var(--border);
+      border-left-width: 4px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+    .metric-box--auto { border-left-color: var(--auto); }
+    .metric-box--steer { border-left-color: var(--steer); }
+    .metric-box--pedal { border-left-color: var(--pedal); }
+
+    .metric-label-wrap { display: inline-flex; align-items: center; gap: 9px; min-width: 0; }
+    .metric-icon { width: 30px; height: 30px; border-radius: 50%; object-fit: cover; flex-shrink: 0; }
+    .metric-label { font-size: 0.85rem; color: var(--muted); }
+    .metric-val { font-size: 1.02rem; font-weight: 800; color: var(--text); text-align: right; }
+
+    .sub-row {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .card-footer {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      padding-top: 8px;
+      border-top: 1px solid rgba(42, 57, 88, 0.7);
+    }
+
+    @container (max-width: 540px) {
+      .metrics-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header class="topbar">
+      <div>
+        <h1>CarrotPilot 주행 품질 리포트</h1>
+        <p>comma 3/3X 파킹(P) 진입 시 저장된 주행 품질 리포트 기록 조회</p>
+      </div>
+      <div class="topbar-actions">
+        <a class="btn" href="/">Carrot Web 홈으로</a>
+      </div>
+    </header>
+
+    <div id="statusBanner" class="status-banner" role="status" aria-live="polite" hidden></div>
+
+    <section class="reports-toolbar" aria-label="저장된 주행 리포트 관리">
+      <h2>저장된 주행 품질 리포트 (<span id="reportCount">0</span>건)</h2>
+      <div class="btn-row">
+        <button id="btnRefreshReports" class="btn" type="button">새로고침</button>
+      </div>
+    </section>
+
+    <section id="reportsContainer" class="reports-list" aria-live="polite"></section>
+  </main>
+
+  <script>
+    "use strict";
+
+    const bannerEl = document.getElementById("statusBanner");
+    const reportCountEl = document.getElementById("reportCount");
+    const reportsEl = document.getElementById("reportsContainer");
+
+    const CTRL_ICONS = {
+      auto: "/shared-assets/icons/drive_report_auto.png",
+      steer: "/shared-assets/icons/drive_report_steer.png",
+      gas: "/shared-assets/icons/drive_report_gas.png",
+      brake: "/shared-assets/icons/drive_report_brake.png",
+    };
+
+    function showBanner(msg) {
+      bannerEl.textContent = msg;
+      bannerEl.hidden = false;
+    }
+
+    async function apiJson(url, options = {}) {
+      const resp = await fetch(url, options);
+      const data = await resp.json().catch(() => ({}));
+      return { ok: resp.ok && data.ok !== false, data };
+    }
+
+    function makeMetricBox(cls, label, text, iconSrc) {
+      const box = document.createElement("div");
+      box.className = "metric-box " + cls;
+      const wrap = document.createElement("span");
+      wrap.className = "metric-label-wrap";
+      if (iconSrc) {
+        const img = document.createElement("img");
+        img.className = "metric-icon";
+        img.src = iconSrc;
+        img.alt = "";
+        wrap.appendChild(img);
+      }
+      const lbl = document.createElement("span");
+      lbl.className = "metric-label";
+      lbl.textContent = label;
+      wrap.appendChild(lbl);
+      const val = document.createElement("span");
+      val.className = "metric-val";
+      val.textContent = text;
+      box.append(wrap, val);
+      return box;
+    }
+
+    function renderReports(reports) {
+      reportsEl.innerHTML = "";
+      reportCountEl.textContent = String(reports.length);
+      if (!reports.length) {
+        const empty = document.createElement("article");
+        empty.className = "card";
+        const p = document.createElement("p");
+        p.style.margin = "0";
+        p.style.color = "var(--muted)";
+        p.textContent = "저장된 주행 품질 리포트가 아직 없습니다. (300m 또는 1분 이상 주행 후 P 변속 시 자동 저장)";
+        empty.appendChild(p);
+        reportsEl.appendChild(empty);
+        return;
+      }
+
+      for (const r of reports) {
+        const card = document.createElement("article");
+        card.className = "card";
+
+        const header = document.createElement("header");
+        header.className = "card-header";
+        const titleWrap = document.createElement("div");
+        const title = document.createElement("h3");
+        title.textContent = `${r.time_range_label || r.report_id} · ${Number(r.distance_km || 0).toFixed(1)}km · 총 ${r.duration_text || ""} (정차 ${r.idle_text || "0초"})`;
+        const sub = document.createElement("div");
+        sub.className = "hint";
+        sub.textContent = `${r.vehicle_name || "CarrotPilot"} · 종합 ${r.score ?? 0}점 (Grade ${r.grade || "-"}) · 제어 비율은 정차 제외 실주행 기준`;
+        titleWrap.append(title, sub);
+
+        const badge = document.createElement("span");
+        badge.className = "pill";
+        badge.textContent = `${r.score ?? 0}점 · Grade ${r.grade || "-"}`;
+        header.append(titleWrap, badge);
+
+        const ratios = r.ratios || {};
+        const autoPct = Number(ratios.auto_pct || 0);
+        const steerPct = Number(ratios.steer_pct || 0);
+        const pedalPct = Number(ratios.pedal_pct || 0);
+
+        const bar = document.createElement("div");
+        bar.className = "ratio-bar";
+        for (const [cls, pct] of [["ratio-seg--auto", autoPct], ["ratio-seg--steer", steerPct], ["ratio-seg--pedal", pedalPct]]) {
+          if (pct > 0) {
+            const seg = document.createElement("div");
+            seg.className = cls;
+            seg.style.width = pct + "%";
+            bar.appendChild(seg);
+          }
+        }
+
+        const legend = document.createElement("div");
+        legend.className = "legend-row";
+        for (const [color, label, iconList] of [
+          ["var(--auto)", `자동주행 ${autoPct}%`, [CTRL_ICONS.auto]],
+          ["var(--steer)", `수동조향 ${steerPct}%`, [CTRL_ICONS.steer]],
+          ["var(--pedal)", `수동페달 ${pedalPct}%`, [CTRL_ICONS.gas, CTRL_ICONS.brake]],
+        ]) {
+          const item = document.createElement("span");
+          item.className = "legend-item";
+          const dot = document.createElement("span");
+          dot.className = "legend-dot";
+          dot.style.background = color;
+          const iconWrap = document.createElement("span");
+          iconWrap.className = "legend-icons";
+          for (const src of iconList) {
+            const img = document.createElement("img");
+            img.className = "legend-icon";
+            img.src = src;
+            img.alt = "";
+            iconWrap.appendChild(img);
+          }
+          const txt = document.createElement("span");
+          txt.textContent = label;
+          item.append(dot, iconWrap, txt);
+          legend.appendChild(item);
+        }
+
+        const controls = r.controls || {};
+        const grid = document.createElement("div");
+        grid.className = "metrics-grid";
+        grid.append(
+          makeMetricBox("metric-box--auto", "자동주행", (controls.auto && controls.auto.text) || "0초 (0회)", CTRL_ICONS.auto),
+          makeMetricBox("metric-box--steer", "수동조향", (controls.steer && controls.steer.text) || "0초 (0회)", CTRL_ICONS.steer),
+          makeMetricBox("metric-box--pedal", "수동페달 · 가속", (controls.gas && controls.gas.text) || "0초 (0회)", CTRL_ICONS.gas),
+          makeMetricBox("metric-box--pedal", "수동페달 · 브레이크", (controls.brake && controls.brake.text) || "0초 (0회)", CTRL_ICONS.brake),
+        );
+
+        const spd = r.speed || {};
+        const hb = r.hard_brakes || {};
+        const subRow = document.createElement("div");
+        subRow.className = "sub-row";
+        const speedInfo = document.createElement("span");
+        speedInfo.textContent = `평균 ${Number(spd.avg_kph || 0).toFixed(1)} km/h · 최고 ${Number(spd.max_kph || 0).toFixed(1)} km/h`;
+        const hbInfo = document.createElement("span");
+        hbInfo.textContent = `급정거 (≤ -2.8 m/s²): 자동주행 ${hb.auto_count ?? 0}회 / 수동 ${hb.manual_count ?? 0}회`;
+        subRow.append(speedInfo, hbInfo);
+
+        const footer = document.createElement("footer");
+        footer.className = "card-footer";
+        const pathSpan = document.createElement("span");
+        pathSpan.className = "hint";
+        pathSpan.textContent = r.file_path || "";
+
+        const delBtn = document.createElement("button");
+        delBtn.type = "button";
+        delBtn.className = "btn btn--danger";
+        delBtn.textContent = "삭제";
+        delBtn.addEventListener("click", async () => {
+          delBtn.disabled = true;
+          const res = await apiJson(`/api/drive-reports/${encodeURIComponent(r.report_id)}`, { method: "DELETE" });
+          if (res.ok) showBanner(`리포트(${r.report_id})를 삭제했습니다.`);
+          await loadReports();
+        });
+
+        footer.append(pathSpan, delBtn);
+        card.append(header, bar, legend, grid, subRow, footer);
+        reportsEl.appendChild(card);
+      }
+    }
+
+    async function loadReports() {
+      const res = await apiJson("/api/drive-reports");
+      if (res.ok) {
+        renderReports(res.data.reports || []);
+      }
+    }
+
+    document.getElementById("btnRefreshReports").addEventListener("click", loadReports);
+    loadReports();
+  </script>
+</body>
+</html>

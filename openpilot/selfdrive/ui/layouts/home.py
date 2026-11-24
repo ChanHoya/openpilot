@@ -3,6 +3,8 @@ import pyray as rl
 from collections.abc import Callable
 from enum import IntEnum
 from openpilot.common.params import Params
+from openpilot.selfdrive.carrot.drive_report import DriveReportStore
+from openpilot.selfdrive.ui.onroad.drive_report_dialog import DriveReportDialog
 from openpilot.selfdrive.ui.widgets.offroad_alerts import UpdateAlert, OffroadAlert
 from openpilot.selfdrive.ui.widgets.exp_mode_button import ExperimentalModeButton
 from openpilot.selfdrive.ui.widgets.prime import PrimeWidget
@@ -54,6 +56,8 @@ class HomeLayout(Widget):
 
     self.update_notif_rect = rl.Rectangle(0, 0, 200, HEADER_HEIGHT - 10)
     self.alert_notif_rect = rl.Rectangle(0, 0, 220, HEADER_HEIGHT - 10)
+    self.drive_report_btn_rect = rl.Rectangle(0, 0, 240, HEADER_HEIGHT - 10)
+    self._drive_report_dialog: DriveReportDialog | None = None
 
     self._prime_widget = PrimeWidget()
     self._setup_widget = SetupWidget()
@@ -131,6 +135,27 @@ class HomeLayout(Widget):
     self.alert_notif_rect.x = notif_x
     self.alert_notif_rect.y = self.header_rect.y + (self.header_rect.height - 60) // 2
 
+    report_x = self.header_rect.x
+    if self.update_available:
+      report_x += self.update_notif_rect.width + 16
+    if self.alert_count > 0:
+      report_x += self.alert_notif_rect.width + 16
+    self.drive_report_btn_rect.x = report_x
+    self.drive_report_btn_rect.y = self.header_rect.y + (self.header_rect.height - 60) // 2
+
+  def _open_drive_report_history(self):
+    if self._drive_report_dialog is not None and not self._drive_report_dialog.is_closed:
+      return
+    dialog: DriveReportDialog | None = None
+
+    def _on_close() -> None:
+      if self._drive_report_dialog is dialog:
+        self._drive_report_dialog = None
+
+    dialog = DriveReportDialog(None, on_close=_on_close, store=DriveReportStore(), initial_history=True)
+    self._drive_report_dialog = dialog
+    gui_app.push_widget(dialog)
+
   def _handle_mouse_release(self, mouse_pos: MousePos):
     super()._handle_mouse_release(mouse_pos)
 
@@ -138,6 +163,8 @@ class HomeLayout(Widget):
       self._set_state(HomeLayoutState.UPDATE)
     elif self.alert_count > 0 and rl.check_collision_point_rec(mouse_pos, self.alert_notif_rect):
       self._set_state(HomeLayoutState.ALERTS)
+    elif rl.check_collision_point_rec(mouse_pos, self.drive_report_btn_rect):
+      self._open_drive_report_history()
 
   def _render_header(self):
     font = gui_app.font(FontWeight.MEDIUM)
@@ -171,6 +198,16 @@ class HomeLayout(Widget):
       text_x = self.alert_notif_rect.x + (self.alert_notif_rect.width - text_size.x) // 2
       text_y = self.alert_notif_rect.y + (self.alert_notif_rect.height - text_size.y) // 2
       rl.draw_text_ex(font, alert_text, rl.Vector2(int(text_x), int(text_y)), HEAD_BUTTON_FONT_SIZE, 0, rl.WHITE)
+
+    # Drive report history button
+    version_text_width -= self.drive_report_btn_rect.width + 16
+    rl.draw_rectangle_rounded(self.drive_report_btn_rect, 0.3, 10, rl.Color(38, 52, 82, 255))
+    rl.draw_rectangle_rounded_lines_ex(self.drive_report_btn_rect, 0.3, 10, 2, rl.Color(59, 130, 246, 255))
+    report_label = "주행 리포트"
+    report_sz = measure_text_cached(font, report_label, 34)
+    rx = self.drive_report_btn_rect.x + (self.drive_report_btn_rect.width - report_sz.x) // 2
+    ry = self.drive_report_btn_rect.y + (self.drive_report_btn_rect.height - report_sz.y) // 2
+    rl.draw_text_ex(font, report_label, rl.Vector2(int(rx), int(ry)), 34, 0, rl.WHITE)
 
     # Version text (right aligned)
     if self.update_available or self.alert_count > 0:
